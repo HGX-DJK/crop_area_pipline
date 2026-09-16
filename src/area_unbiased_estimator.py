@@ -61,6 +61,24 @@ class AreaUnbiasedEstimator:
             else:
                 cond_matrix[i_idx, i_idx] = 1.0  # 缺测时设为对角占优
 
+        # 遵循联合国手册第 24 章【耕地目标域分层（Cropland Domain Stratification）】：
+        # 针对宏观大尺度遥感图（背景非农田像元占比 > 80%），当某作物在全域地图中无检出像元（Count = 0）时，
+        # 判定该作物不在当前专题图或生长季观测域内，杜绝局部小样点背景误判概率向全境荒漠/海洋/林地无限外推
+        bg_pixel_ratio = float(map_pixel_dict.get(0, 0)) / max(total_pixels, 1)
+        is_macro_background = bg_pixel_ratio > 0.80
+
+        if is_macro_background:
+            # 锁定未观测作物的背景跨类外推，防止背景泄漏 (Background Leakage)
+            for j_idx, j_cls in enumerate(all_crop_ids):
+                if j_cls != 0 and map_pixel_dict.get(j_cls, 0) == 0:
+                    cond_matrix[0, j_idx] = 0.0
+            # 重新归一化背景行概率
+            row_sum = np.sum(cond_matrix[0, :])
+            if row_sum > 0:
+                cond_matrix[0, :] /= row_sum
+            else:
+                cond_matrix[0, 0] = 1.0
+
         # 4. 计算联合国手册第 24 章加权点估计量 (Calibrated Point Estimate)
         map_area_m2_vector = np.array([map_pixel_dict.get(c, 0) * self.pixel_area_m2 for c in all_crop_ids], dtype=np.float64)
         
@@ -87,6 +105,16 @@ class AreaUnbiasedEstimator:
                         b_cond[i_idx, j_idx] = num / denom
                 else:
                     b_cond[i_idx, i_idx] = 1.0
+
+            if is_macro_background:
+                for j_idx, j_cls in enumerate(all_crop_ids):
+                    if j_cls != 0 and map_pixel_dict.get(j_cls, 0) == 0:
+                        b_cond[0, j_idx] = 0.0
+                row_sum = np.sum(b_cond[0, :])
+                if row_sum > 0:
+                    b_cond[0, :] /= row_sum
+                else:
+                    b_cond[0, 0] = 1.0
 
             boot_calibrated_m2[b, :] = np.dot(map_area_m2_vector, b_cond)
 

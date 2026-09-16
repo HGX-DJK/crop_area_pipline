@@ -1,0 +1,89 @@
+# ==============================================================================
+# 🌾 农作物种植区域提取与地块矢量化系统 (crop_area_pipeline) Git 忽略规则
+# ==============================================================================
+
+# --- 1. 遥感大文件与多波段影像 (防止超出 GitHub 100MB 单文件上限) ---
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+*.img
+*.nc
+*.hdf
+*.h5
+*.jp2
+*.geotiff
+data/satellite_tifs/*.tif
+data/satellite_tifs/*.tiff
+
+# --- 2. 流程运行动态生成产物 (仅保留 .gitkeep 保持目录结构) ---
+output/*
+!output/.gitkeep
+
+# --- 3. Python 字节码、编译缓存与打包产物 ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- 4. Python 虚拟环境与依赖环境 ---
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+conda-env/
+
+# --- 5. IDE 与代码编辑器配置 ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+
+# --- 6. 操作系统临时文件 ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# --- 7. 压缩包与大型归档数据 ---
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.tar
+*.gz
+*.bz2
+
+# --- 8. 测试与代码质量工具缓存 ---
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.tox/

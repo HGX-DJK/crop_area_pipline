@@ -321,6 +321,118 @@ def _simplify_polygon(points, tolerance=0.5):
     return res
 
 
+def _chaikin_smooth(points, iterations=1):
+    """
+    Chaikin 拐角切割拓扑平滑算法 (Chaikin's Corner-Cutting Algorithm)。
+    针对栅格网格边缘追踪形成的直角阶梯台阶（锯齿），在保持首尾严密闭合、拓扑不自交
+    与总体面积守恒的前提下，通过内切各拐角拟合出自然平滑的农田有机边界轮廓。
+    """
+    if len(points) < 4:
+        return points
+    
+    pts = list(points)
+    if pts[0] == pts[-1]:
+        pts = pts[:-1]
+        
+    n = len(pts)
+    if n < 3:
+        return points
+
+    for _ in range(iterations):
+        smoothed = []
+        for i in range(n):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n]
+            # Q 点: 75% 靠向 p0，25% 靠向 p1
+            q_x = 0.75 * p0[0] + 0.25 * p1[0]
+            q_y = 0.75 * p0[1] + 0.25 * p1[1]
+            # R 点: 25% 靠向 p0，75% 靠向 p1
+            r_x = 0.25 * p0[0] + 0.75 * p1[0]
+            r_y = 0.25 * p0[1] + 0.75 * p1[1]
+            smoothed.append((q_x, q_y))
+            smoothed.append((r_x, r_y))
+        pts = smoothed
+        n = len(pts)
+
+    # 重新封闭首尾环
+    pts.append(pts[0])
+    return pts
+
+
+def assign_province_and_zone(lon, lat):
+    """
+    基于经纬度空间边界自动识别地块所属行政省份与国家级优势农业区划。
+    全量覆盖黄淮海冬麦区、关中平原、长江中下游及新疆绿洲灌区。
+    """
+    # 新疆绿洲麦区
+    if 73.0 <= lon <= 96.0 and 34.0 <= lat <= 49.0:
+        if lat < 40.0:
+            return "新疆维吾尔自治区", "南疆绿洲冬春麦区"
+        else:
+            return "新疆维吾尔自治区", "北疆绿洲灌溉麦区"
+
+    # 陕西关中平原
+    if 106.5 <= lon <= 110.8 and 33.5 <= lat <= 35.8:
+        return "陕西省", "关中平原冬小麦核心主产区"
+
+    # 陕南汉中 / 川东北
+    if 106.0 <= lon <= 111.0 and 31.5 <= lat < 33.5:
+        return "陕西省/四川省", "秦巴山地/汉中盆地麦区"
+    
+    # 陕北 / 陇东黄土高原
+    if 106.0 <= lon <= 111.0 and 35.8 < lat <= 39.5:
+        return "陕西省/甘肃省", "黄土高原旱作冬小麦区"
+
+    # 甘肃河西或陇中
+    if 96.0 < lon <= 106.5 and 33.0 <= lat <= 41.0:
+        return "甘肃省", "河西走廊/陇东旱作麦区"
+
+    # 河南南阳盆地 / 湖北襄阳平原
+    if 110.8 <= lon <= 114.5 and 31.5 <= lat <= 33.8:
+        if lat < 32.5:
+            return "湖北省/河南省", "襄阳平原/南阳盆地交界麦区"
+        else:
+            return "河南省", "南阳盆地优质冬小麦区"
+
+    # 河南豫中、豫东、豫北核心黄淮平原 (全国第一大小麦主产省)
+    if 112.5 <= lon <= 116.5 and 33.8 < lat <= 36.5:
+        return "河南省", "黄淮豫中平原冬小麦核心主产区"
+
+    # 山西盆地 (汾河谷地、运城、临汾)
+    if 110.5 <= lon <= 114.0 and 35.0 <= lat <= 39.0:
+        return "山西省", "汾河谷地/晋南盆地冬小麦区"
+
+    # 河北平原（冀中南、石家庄、邯郸、邢台）
+    if 114.0 <= lon <= 118.5 and 36.5 < lat <= 40.5:
+        return "河北省", "冀中南低洼平原优质麦区"
+
+    # 山东平原（鲁西北、鲁西南、黄河三角洲）
+    if 115.5 <= lon <= 122.5 and 34.5 <= lat <= 38.5:
+        return "山东省", "鲁西平原/黄河三角洲冬麦区"
+
+    # 安徽省（淮北平原、宿州、亳州、阜阳）
+    if 114.8 <= lon <= 118.8 and 32.5 <= lat <= 34.8:
+        return "安徽省", "淮北平原沿淮优势冬小麦区"
+
+    # 江苏省（苏北平原、淮安、徐州、盐城、连云港）
+    if 118.0 <= lon <= 122.0 and 32.0 <= lat <= 35.2:
+        return "江苏省", "苏北平原淮北冬小麦优势区"
+
+    # 四川盆地
+    if 102.5 <= lon <= 109.0 and 28.0 <= lat <= 32.5:
+        return "四川省", "四川盆地丘陵冬小麦区"
+
+    # 湖北沿江平原 (江汉平原)
+    if 111.5 <= lon <= 116.5 and 29.5 <= lat < 31.5:
+        return "湖北省", "江汉平原两熟制冬麦水稻轮作区"
+
+    # 默认兜底
+    if 110.0 <= lon <= 122.0 and 30.0 <= lat <= 40.0:
+        return "黄淮海平原区", "黄淮海平原优势冬小麦带"
+
+    return "全国农区", "全国重要农作物优势聚集片区"
+
+
 class VectorExporter:
     """农田地块几何矢量化与空间属性导出器"""
 
@@ -404,8 +516,12 @@ class VectorExporter:
                 (min_r, min_c)
             ]
 
-        # 简化多边形几何顶点
+        # 简化多边形几何顶点 (消除网格共线冗余点并执行 RDP 拓扑抽稀)
         simplified = _simplify_polygon(pts_grid, tolerance=0.5)
+
+        # 拓扑保形 Chaikin 拐角切割平滑算法 (平滑直角网格锯齿，生成自然农田轮廓)
+        if self.config.get("segmentation", {}).get("smooth_boundaries", True):
+            simplified = _chaikin_smooth(simplified, iterations=1)
 
         is_geo_input = is_geographic_system(geo_info)
 
@@ -493,10 +609,26 @@ class VectorExporter:
             else:
                 machinery_suitability = "中/碎 (建议并块平整)"
 
+            # 智能判定行政省份与农业优势区划
+            province_name, agri_zone = assign_province_and_zone(c_lon, c_lat)
+
+            # 产业片区规模等级
+            if meta["area_mu"] >= 5000000.0:
+                tier_label = "特大型核心产业带 (>500万亩)"
+            elif meta["area_mu"] >= 1000000.0:
+                tier_label = "大型集中主产区 (100~500万亩)"
+            elif meta["area_mu"] >= 100000.0:
+                tier_label = "中型集中片区 (10~100万亩)"
+            else:
+                tier_label = "规范规整农田区 (<10万亩)"
+
             props = {
                 "parcel_id": meta["parcel_id"],
                 "crop_code": meta["crop_code"],
                 "crop_name": crop_name,
+                "province": province_name,
+                "agri_zone": agri_zone,
+                "area_tier": tier_label,
                 "area_mu": meta["area_mu"],
                 "area_ha": meta["area_ha"],
                 "area_m2": meta["area_m2"],
@@ -555,6 +687,27 @@ class VectorExporter:
         df_props = pd.DataFrame([feat["properties"] for feat in features])
         df_props.to_csv(csv_path, index=False, encoding="utf-8-sig")
         print(f"[矢量导出] 已成功保存地块属性台账清单至: {csv_path}")
+
+        # 自动生成分省种植面积与集中度汇总台账
+        if "province" in df_props.columns and len(df_props) > 0:
+            prov_summary = df_props.groupby("province").agg(
+                parcel_count=("parcel_id", "count"),
+                total_area_mu=("area_mu", "sum"),
+                total_area_ha=("area_ha", "sum"),
+                mean_purity=("dominant_purity", "mean"),
+                mean_confidence=("mean_confidence", "mean")
+            ).reset_index().sort_values(by="total_area_mu", ascending=False)
+            
+            total_cult_mu = df_props["area_mu"].sum()
+            prov_summary["area_share_pct"] = (prov_summary["total_area_mu"] / max(total_cult_mu, 1e-4) * 100.0).round(2)
+            prov_summary["total_area_mu"] = prov_summary["total_area_mu"].round(1)
+            prov_summary["total_area_ha"] = prov_summary["total_area_ha"].round(2)
+            prov_summary["mean_purity"] = prov_summary["mean_purity"].round(3)
+            prov_summary["mean_confidence"] = prov_summary["mean_confidence"].round(3)
+            
+            prov_csv = output_path.replace(".geojson", "_province_summary.csv")
+            prov_summary.to_csv(prov_csv, index=False, encoding="utf-8-sig")
+            print(f"[空间统计] 已成功生成分省农作物种植面积与集中度汇总表至: {prov_csv}")
 
         # 若为 WGS84 标准经纬度，自动输出单文件极速交互式 Web 卫星地图（双击直接在浏览器打开）
         if is_wgs84:
@@ -630,6 +783,27 @@ class VectorExporter:
               <span style="color:#718096; font-size:11px; margin-left:8px;">{st["count"]}块 ({round(st["mu"], 1)}亩)</span>
             </label>'''
 
+        # 提取全国 Top 10 主力冬小麦基地 (按面积降序)
+        sorted_features = sorted(features, key=lambda f: f["properties"].get("area_mu", 0), reverse=True)
+        top10_features = sorted_features[:10]
+        top10_html = ""
+        for rank, tf in enumerate(top10_features, 1):
+            tp = tf["properties"]
+            t_pid = tp["parcel_id"]
+            t_prov = tp.get("province", "主产区")
+            t_mu = round(tp.get("area_mu", 0) / 10000.0, 1)  # 万亩
+            top10_html += f'''
+            <div class="top10-item" onclick="flyToParcel('{t_pid}')" title="点击飞行直达审查 {t_pid}">
+              <div class="top10-rank">#{rank}</div>
+              <div class="top10-info">
+                <div class="top10-name">{t_pid} · {t_prov}</div>
+                <div class="top10-val">{t_mu} 万亩 ({tp.get("crop_name", "冬小麦")})</div>
+              </div>
+            </div>'''
+
+        # 统计覆盖省份数量
+        provinces_count = len(set(f["properties"].get("province", "") for f in features if f["properties"].get("province")))
+
         html_template = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -654,7 +828,7 @@ class VectorExporter:
       font-size: 15px; font-weight: bold; color: #1a365d; display: flex; align-items: center; gap: 6px;
     }}
     .hud-stats {{
-      display: flex; align-items: center; gap: 14px;
+      display: flex; align-items: center; gap: 12px;
     }}
     .stat-pill {{
       background: #edf2f7; padding: 4px 10px; border-radius: 6px; font-size: 12px; color: #2d3748;
@@ -682,6 +856,37 @@ class VectorExporter:
       display: flex; justify-content: space-between; align-items: center;
     }}
 
+    /* 右侧 Top 10 主力基地导航浮窗 */
+    .top10-panel {{
+      position: absolute; top: 75px; right: 15px; z-index: 999;
+      background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(8px);
+      padding: 12px 14px; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+      max-width: 260px; max-height: 480px; overflow-y: auto;
+    }}
+    .top10-title {{
+      font-weight: bold; font-size: 13px; color: #1a202c; margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #e2e8f0; padding-bottom: 5px;
+    }}
+    .top10-item {{
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+      cursor: pointer; transition: all 0.2s; margin-bottom: 4px; font-size: 12px;
+    }}
+    .top10-item:hover {{
+      background: #ebf8ff; transform: translateX(3px);
+    }}
+    .top10-rank {{
+      background: #3182ce; color: #fff; border-radius: 4px; padding: 2px 5px; font-weight: bold; font-size: 11px;
+    }}
+    .top10-info {{
+      flex: 1; overflow: hidden;
+    }}
+    .top10-name {{
+      font-weight: 600; color: #2d3748; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }}
+    .top10-val {{
+      color: #718096; font-size: 11px;
+    }}
+
     /* 弹窗样式 */
     .leaflet-popup-content-wrapper {{
       border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,0.25);
@@ -705,6 +910,7 @@ class VectorExporter:
     </div>
     <div class="hud-stats">
       <div class="stat-pill">地块总数: <b>{total_parcels}</b> 块</div>
+      <div class="stat-pill">覆盖农区: <b>{provinces_count}</b> 个省区</div>
       <div class="stat-pill">净耕地面积: <b>{total_mu}</b> 亩 <span style="color:#718096;">({total_ha} ha)</span></div>
       <div class="stat-pill">农机适机良好率: <b style="color:#2f855a;">{machinery_rate}%</b></div>
     </div>
@@ -713,6 +919,15 @@ class VectorExporter:
       <button onclick="searchParcel()" style="background:#3182ce; color:#fff; border:none; border-radius:6px; padding:5px 10px; font-size:12px; cursor:pointer;">定位</button>
       <button onclick="downloadGeoJSON()" title="下载矢量 GeoJSON" style="background:#48bb78; color:#fff; border:none; border-radius:6px; padding:5px 8px; font-size:12px; cursor:pointer;">📥 导出</button>
     </div>
+  </div>
+
+  <!-- 右侧 Top 10 主力基地导航浮窗 -->
+  <div class="top10-panel">
+    <div class="top10-title">
+      <span>🏆 核心产区直达 (Top 10)</span>
+      <span style="font-size:10px; color:#718096; font-weight:normal;">点击飞行聚焦</span>
+    </div>
+    {top10_html}
   </div>
 
   <!-- 左下角作物图例与交互筛选 -->
@@ -735,6 +950,9 @@ class VectorExporter:
     var esriSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       attribution: 'Tiles &copy; Esri World Imagery'
     }});
+    var cartoDark = L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
+      attribution: '&copy; CartoDB Dark Matter'
+    }});
     var osm = L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       attribution: '&copy; OpenStreetMap'
     }});
@@ -745,7 +963,11 @@ class VectorExporter:
       layers: [esriSat]
     }});
 
-    var baseMaps = {{ "🛰️ 高清卫星影像 (Esri)": esriSat, "🗺️ 矢量电子地图 (OSM)": osm }};
+    var baseMaps = {{
+      "🛰️ 高清遥感底图 (Esri)": esriSat,
+      "🌃 科技暗夜驾驶舱 (CartoDB)": cartoDark,
+      "🗺️ 矢量行政地图 (OSM)": osm
+    }};
     L.control.layers(baseMaps, null, {{ position: 'topright' }}).addTo(map);
 
     function getSuitabilityBadge(suitability) {{
@@ -772,9 +994,11 @@ class VectorExporter:
       layersByParcelId[p.parcel_id] = layer;
 
       var suitBadge = getSuitabilityBadge(p.machinery_suitability || '良好');
-      var popupContent = "<div style='font-size:13px; line-height:1.6; min-width:210px;'>" +
+      var popupContent = "<div style='font-size:13px; line-height:1.6; min-width:230px;'>" +
         "<div style='font-size:14px; font-weight:bold; color:#1a365d; border-bottom:2px solid #3182ce; padding-bottom:4px; margin-bottom:6px;'>" +
         "📌 地块 " + p.parcel_id + " (" + p.crop_name + ")</div>" +
+        "<b>🏛️ 归属农区:</b> <span style='color:#2b6cb0; font-weight:bold;'>" + (p.province || '主产区') + "</span> (" + (p.agri_zone || '优势区') + ")<br>" +
+        "<b>🏷️ 规模梯队:</b> <span style='background:#edf2f7; padding:2px 6px; border-radius:4px; font-size:11px;'>" + (p.area_tier || '主产区') + "</span><br>" +
         "<b>实测种植面积:</b> <span style='color:#c53030; font-weight:bold; font-size:14px;'>" + p.area_mu + " 亩</span> (" + p.area_ha + " ha)<br>" +
         "<b>物理实测周长:</b> " + p.perimeter_m + " 米<br>" +
         "<b>农机适机性:</b> " + suitBadge + " (紧凑度 " + (p.compactness || 0) + ")<br>" +
@@ -823,6 +1047,15 @@ class VectorExporter:
       renderGeoJsonLayer();
     }}
 
+    function flyToParcel(pid) {{
+      var layer = layersByParcelId[pid];
+      if (layer) {{
+        map.fitBounds(layer.getBounds(), {{ maxZoom: 14, padding: [50, 50] }});
+        layer.openPopup();
+        layer.setStyle({{ weight: 4, color: '#00ffcc', dashArray: '', fillOpacity: 0.95 }});
+      }}
+    }}
+
     function searchParcel() {{
       var q = document.getElementById('parcelSearch').value.trim().toUpperCase();
       if (!q) return;
@@ -830,14 +1063,13 @@ class VectorExporter:
       for (var pid in layersByParcelId) {{
         var layer = layersByParcelId[pid];
         var p = layer.feature.properties;
-        if (pid.toUpperCase() === q || p.crop_name.indexOf(q) >= 0) {{
-          map.fitBounds(layer.getBounds(), {{ maxZoom: 18, padding: [50, 50] }});
-          layer.openPopup();
-          layer.setStyle({{ weight: 4, color: '#ff0055', fillOpacity: 0.95 }});
+        var prov = (p.province || '').toUpperCase();
+        if (pid.toUpperCase() === q || p.crop_name.indexOf(q) >= 0 || prov.indexOf(q) >= 0) {{
+          flyToParcel(pid);
           return;
         }}
       }}
-      alert("未检索到编号或名称包含 '" + q + "' 的农田地块！");
+      alert("未检索到编号、名称或省份包含 '" + q + "' 的农田地块！");
     }}
 
     function downloadGeoJSON() {{
@@ -865,7 +1097,8 @@ class VectorExporter:
         with open(output_html_path, "w", encoding="utf-8") as f:
             f.write(html_template)
         print(f"[交互地图] 已成功生成数字农情驾驶舱 Web 卫星地图: {output_html_path}")
-        print(f"           (支持 Esri 卫星底图、作物实时筛选、地块快速定位、纯前端导出，双击浏览器直接打开)")
+        print(f"           (新增 Top 10 主力基地一键直达导航、三套底图自由切换、省份农区卡片)")
+        return output_html_path
         return output_html_path
 
     def export_geotiff(self, classified_mask, geo_info, output_tif_path="output/crop_classification_map.tif"):

@@ -26,6 +26,7 @@ from src.area_unbiased_estimator import AreaUnbiasedEstimator
 from src.visualizer import Visualizer
 from src.raster_loader import RasterLoader
 from src.rotation_tracker import CropRotationTracker
+from src.report_generator import ExecutiveReportGenerator
 
 
 def load_config(config_path="config.yaml"):
@@ -123,6 +124,12 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     df_area_report.to_csv(report_csv, index=False)
     print(f"  -> 已保存官方级无偏种植面积统计台账至: {report_csv}")
 
+    # 自动生成全国冬小麦遥感空间监测与决策分析专报 (出版级单文件 HTML)
+    report_gen = ExecutiveReportGenerator(config)
+    csv_parcels = geojson_out.replace(".geojson", "_attribute_table.csv")
+    briefing_html = os.path.join(output_dir, "national_wheat_executive_briefing.html")
+    report_gen.generate_report(report_csv, csv_parcels, briefing_html)
+
     # 7. 可选长时序（20~30年）农田轮作演变与撂荒/补贴合规监测
     do_rotation = track_rotation or config.get("rotation_tracking", {}).get("enabled", False)
     if do_rotation:
@@ -165,7 +172,12 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     print(f"📌 零碎地块切分总结: 共勾勒 {total_valid_parcels} 个地块，平均单块面积 {(total_cultivated_mu/max(total_valid_parcels,1)):.1f} 亩。")
     html_map_path = os.path.join(output_dir, "vectorized_parcels_map.html")
     if os.path.exists(html_map_path):
-        print(f"🌐 数字驾驶舱 Web 卫星地图已生成: {html_map_path} (双击浏览器直接打开)")
+        print(f"🌐 数字驾驶舱 Web 卫星地图: {html_map_path} (双击浏览器直接打开)")
+    if os.path.exists(briefing_html):
+        print(f"📑 官方高管决策分析专报: {briefing_html} (一键打印/导出PDF)")
+    prov_csv_path = os.path.join(output_dir, "vectorized_parcels_province_summary.csv")
+    if os.path.exists(prov_csv_path):
+        print(f"📋 全国各省冬小麦统计台账: {prov_csv_path}")
     print(f"✨ 联合国加权样框算法成功校正了小田块田埂像元混淆产生的系统性偏差！")
     print("=" * 86)
     print("🎉 种植区域提取与零碎地块矢量化流水线全部运行完毕！\n")

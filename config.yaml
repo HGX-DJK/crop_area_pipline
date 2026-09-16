@@ -45,6 +45,7 @@ segmentation:
   # 针对零碎小农田块（小至 0.5 亩 ~ 2 亩）的形态学切分参数
   apply_boundary_erosion: true # 是否开启窄田埂边缘腐蚀（防止相邻不同地块粘连）
   fill_internal_holes: true    # 是否闭合田块内部孤立的微小车辙与像元阴影空洞
+  smooth_boundaries: true      # 是否开启 Chaikin 拐角切割拓扑平滑（消除栅格阶梯锯齿）
   min_parcel_area_m2: 200.0    # 最小合法地块面积阈值（平方米，200㎡ ≈ 0.3 亩，过滤噪声碎斑）
   max_parcel_area_m2: 500000.0 # 最大合法地块面积阈值（平方米，50 公顷）
   connectivity: 8              # 连通域拓扑连接方式（4连通或8连通）
