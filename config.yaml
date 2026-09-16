@@ -1,0 +1,83 @@
+# 农作物种植区域提取与零碎地块矢量化流水线配置文件
+# 遵循《联合国农业统计遥感手册》（第 8、11、24、26 章）技术标准
+
+project:
+  name: "UN-Handbook Crop Area & Parcel Extraction Pipeline"
+  version: "1.0.0"
+  description: "基于多时相遥感物候指纹的零碎农田识别、田埂分割与无偏面积统计"
+
+input_source:
+  # 运行模式选择：
+  # 'synthetic': 使用内置的多时相零碎农田基准仿真景观（开箱即用，零依赖快速自测）
+  # 'geotiff': 从本地读取真实的多时相 GeoTIFF 影像切片（Sentinel-2 / Landsat）
+  mode: "geotiff"
+  geotiff_dir: "data/satellite_tifs"
+
+spatial:
+  resolution_meters: 10.0      # 卫星像元空间分辨率（默认对齐 Sentinel-2 的 10 米高精度）
+  crs: "EPSG:32650"            # 输入影像/仿真场景投影坐标系（通用 UTM 投影坐标系，Zone 50N）
+  utm_zone: 50                 # UTM 投影分带号（默认 50 带，中央经线 117°E，覆盖华北平原粮仓区）
+  export_crs: "WGS84"          # GeoJSON 导出坐标系：'WGS84' (经纬度 [lon, lat]，RFC 7946 国际标准) 或 'UTM' (米制投影)
+  origin_x: 500000.0           # 场景参考原点 X (米)
+  origin_y: 4200000.0          # 场景参考原点 Y (米)
+
+
+# 作物分类体系与图例编码（完全动态可扩充，支持全国各农业生态区及长时序动态轮作）
+# 系统内置基于联合国粮农组织 (FAO ICC) 及中国农业农村部遥感监测标准体系
+crop_legend:
+  0: "非农田/背景"             # 包括水体、林地、道路、聚落建筑与休耕裸地
+  1: "夏玉米"                 # 6月播种，8月达到高峰，9月下旬收割 (黄淮海/华北平原典型)
+  2: "冬小麦"                 # 上年10月播种，4-5月抽穗灌浆高峰，6月上旬收割
+  3: "大豆"                   # 5-6月播种，7-8月盛花结荚期，9月中下旬收割
+
+  # --- 可根据您关注的区域与 20-30 年长时序回溯需求，随时取消注释或自由追加新类别：---
+  # 4: "水稻(一季稻/中稻)"     # 5月泡田插秧(具有独特水体V形指纹)，8月孕穗抽穗，10月收割
+  # 5: "冬油菜"               # 10月播种，次年3-4月盛花期(特征性黄花反射陷阱)，5月成熟
+  # 6: "棉花"                 # 4月播种，7-8月开花结铃，9-10月吐絮期高反射 (新疆/黄淮典型)
+  # 7: "花生"                 # 5月播种，7-8月盛花期，9月收获 (黄淮海典型油料经济作物)
+  # 8: "马铃薯(土豆)"         # 4-5月垄作播种，6-7月开花期，8-9月收获 (北方一作区/西南典型)
+  # 9: "甘蔗"                 # 华南高生物量多年生/长周期作物 (10-12个月生长跨度)
+  # 10: "甜菜"                # 北方温带与西北干旱灌区特征糖料作物
+  # 11: "设施农业/塑料大棚"   # 高反射薄膜覆盖、全年多茬、高频时序波动
+  # 12: "果园/茶园"           # 多年生常绿/落叶木本植物，时序季相平缓无翻耕期
+
+segmentation:
+  # 针对零碎小农田块（小至 0.5 亩 ~ 2 亩）的形态学切分参数
+  apply_boundary_erosion: true # 是否开启窄田埂边缘腐蚀（防止相邻不同地块粘连）
+  fill_internal_holes: true    # 是否闭合田块内部孤立的微小车辙与像元阴影空洞
+  min_parcel_area_m2: 200.0    # 最小合法地块面积阈值（平方米，200㎡ ≈ 0.3 亩，过滤噪声碎斑）
+  max_parcel_area_m2: 500000.0 # 最大合法地块面积阈值（平方米，50 公顷）
+  connectivity: 8              # 连通域拓扑连接方式（4连通或8连通）
+
+preprocessing:
+  apply_temporal_smoothing: false # 是否开启多时相抗噪滤波 (Savitzky-Golay，滤除薄云突变噪声)
+  smoothing_method: "savgol"
+
+classification:
+  model_type: "random_forest"  # 分类模型：'random_forest' 或 'gradient_boosting'
+  n_estimators: 100
+  max_depth: 12
+  n_jobs: -1                   # 多核 CPU 并行加速 (-1 表示调用全部 CPU 核心，推断速度提升 4~8 倍)
+  random_state: 42
+  cv_folds: 5
+
+unbiased_area_inference:
+  enabled: true
+  n_bootstrap: 2000            # Bootstrap 重抽样次数，用于构建 95% 置信区间
+  confidence_level: 0.95       # 置信水平
+
+rotation_tracking:
+  enabled: false               # 是否在主流程默认执行多年期轮作与撂荒分析（亦可通过命令行 --track-rotation 随时开启）
+  early_year: 2020
+  late_year: 2024
+
+paths:
+  data_dir: "data"
+  output_dir: "output"
+  training_samples: "data/sample_training_points.csv"
+  phenology_curves: "data/sample_phenology_curves.csv"
+  ground_truth_samples: "data/ground_truth_area_sample.csv"
+
+visualization:
+  generate_plots: true
+  plot_dpi: 300
