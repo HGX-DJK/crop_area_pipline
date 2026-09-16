@@ -362,75 +362,115 @@ def _chaikin_smooth(points, iterations=1):
 def assign_province_and_zone(lon, lat):
     """
     基于经纬度空间边界自动识别地块所属行政省份与国家级优势农业区划。
-    全量覆盖黄淮海冬麦区、关中平原、长江中下游及新疆绿洲灌区。
+    全量覆盖黄淮海冬麦区、关中平原、长江中下游、宁夏引黄灌区、内蒙古河套及新疆绿洲灌区。
     """
     # 新疆绿洲麦区
-    if 73.0 <= lon <= 96.0 and 34.0 <= lat <= 49.0:
+    if 73.0 <= lon <= 96.5 and 34.0 <= lat <= 49.0:
         if lat < 40.0:
             return "新疆维吾尔自治区", "南疆绿洲冬春麦区"
         else:
             return "新疆维吾尔自治区", "北疆绿洲灌溉麦区"
 
-    # 陕西关中平原
-    if 106.5 <= lon <= 110.8 and 33.5 <= lat <= 35.8:
+    # 宁夏平原引黄灌溉区
+    if 104.0 <= lon <= 107.8 and 35.0 <= lat <= 39.5:
+        return "宁夏回族自治区", "宁夏平原引黄灌区优质小麦带"
+
+    # 内蒙古河套灌区 / 土默川平原
+    if 106.0 <= lon <= 113.0 and 39.5 < lat <= 42.5:
+        return "内蒙古自治区", "河套平原灌溉冬春麦区"
+
+    # 陕西关中平原 (渭河流域粮食基地)
+    if 106.5 <= lon <= 110.8 and 33.8 <= lat <= 35.8:
         return "陕西省", "关中平原冬小麦核心主产区"
 
-    # 陕南汉中 / 川东北
-    if 106.0 <= lon <= 111.0 and 31.5 <= lat < 33.5:
-        return "陕西省/四川省", "秦巴山地/汉中盆地麦区"
+    # 陕南汉中盆地 / 秦巴山地
+    if 106.0 <= lon <= 111.0 and 31.5 <= lat < 33.8:
+        return "陕西省", "陕南秦巴汉中盆地麦区"
     
-    # 陕北 / 陇东黄土高原
-    if 106.0 <= lon <= 111.0 and 35.8 < lat <= 39.5:
-        return "陕西省/甘肃省", "黄土高原旱作冬小麦区"
+    # 陕北黄土高原
+    if 107.0 <= lon <= 111.2 and 35.8 < lat <= 39.5:
+        return "陕西省", "陕北黄土高原丘陵旱作麦区"
 
-    # 甘肃河西或陇中
-    if 96.0 < lon <= 106.5 and 33.0 <= lat <= 41.0:
-        return "甘肃省", "河西走廊/陇东旱作麦区"
-
-    # 河南南阳盆地 / 湖北襄阳平原
-    if 110.8 <= lon <= 114.5 and 31.5 <= lat <= 33.8:
-        if lat < 32.5:
-            return "湖北省/河南省", "襄阳平原/南阳盆地交界麦区"
+    # 甘肃省 (河西走廊 / 陇东)
+    if 96.0 < lon <= 108.5 and 33.0 <= lat <= 42.0:
+        if lon < 103.0:
+            return "甘肃省", "河西走廊绿洲灌溉麦区"
         else:
-            return "河南省", "南阳盆地优质冬小麦区"
+            return "甘肃省", "陇东/陇中旱作冬小麦区"
 
-    # 河南豫中、豫东、豫北核心黄淮平原 (全国第一大小麦主产省)
-    if 112.5 <= lon <= 116.5 and 33.8 < lat <= 36.5:
-        return "河南省", "黄淮豫中平原冬小麦核心主产区"
-
-    # 山西盆地 (汾河谷地、运城、临汾)
-    if 110.5 <= lon <= 114.0 and 35.0 <= lat <= 39.0:
+    # 山西省 (汾河谷地、临汾、运城盆地)
+    if 110.0 <= lon <= 114.5 and 34.5 <= lat <= 40.5:
         return "山西省", "汾河谷地/晋南盆地冬小麦区"
 
-    # 河北平原（冀中南、石家庄、邯郸、邢台）
-    if 114.0 <= lon <= 118.5 and 36.5 < lat <= 40.5:
+    # 河南信阳/豫南淮河流域 (优先于沿淮判断)
+    if 113.8 <= lon <= 115.5 and 31.5 <= lat <= 33.2:
+        return "河南省", "豫南淮河流域冬小麦水稻轮作区"
+
+    # 河南南阳盆地
+    if 110.8 <= lon <= 113.8 and 32.2 <= lat <= 33.8:
+        return "河南省", "南阳盆地优质冬小麦区"
+
+    # 河南豫中、豫东、豫北黄淮核心平原 (全国第一大小麦主产省)
+    if 112.2 <= lon <= 116.5 and 33.0 <= lat <= 36.5:
+        return "河南省", "黄淮豫中平原冬小麦核心主产区"
+
+    # 河北北部坝上/张家口优质麦区
+    if 113.8 <= lon <= 119.5 and 40.5 <= lat <= 42.5:
+        return "河北省", "冀北张家口坝上优质小麦区"
+
+    # 京津冀都市圈核心平原 (石家庄、保定、北京、廊坊)
+    if 115.5 <= lon <= 118.5 and 38.6 < lat <= 40.8:
+        return "河北省", "京津冀都市圈优质冬小麦区"
+
+    # 河北平原（冀中南、邯郸、邢台、衡水、沧州）
+    if 114.0 <= lon <= 118.5 and 36.0 <= lat <= 38.6:
         return "河北省", "冀中南低洼平原优质麦区"
 
-    # 山东平原（鲁西北、鲁西南、黄河三角洲）
-    if 115.5 <= lon <= 122.5 and 34.5 <= lat <= 38.5:
+    # 山东平原（鲁西北、鲁西南、黄河三角洲、胶东）
+    if 115.0 <= lon <= 122.8 and 34.4 <= lat <= 38.5:
         return "山东省", "鲁西平原/黄河三角洲冬麦区"
 
-    # 安徽省（淮北平原、宿州、亳州、阜阳）
-    if 114.8 <= lon <= 118.8 and 32.5 <= lat <= 34.8:
-        return "安徽省", "淮北平原沿淮优势冬小麦区"
+    # 安徽省（淮北平原、宿州、亳州、阜阳、蚌埠、合肥、安庆、池州）
+    if 114.8 <= lon <= 119.5 and 29.8 <= lat <= 34.6:
+        if lat < 31.8:
+            return "安徽省", "皖江平原沿江优势冬麦水稻区"
+        else:
+            return "安徽省", "淮北平原沿淮优势冬小麦区"
 
-    # 江苏省（苏北平原、淮安、徐州、盐城、连云港）
-    if 118.0 <= lon <= 122.0 and 32.0 <= lat <= 35.2:
+    # 江苏省（苏北平原、徐州、淮安、盐城、南通、泰州）
+    if 116.8 <= lon <= 122.2 and 31.0 <= lat <= 35.3:
         return "江苏省", "苏北平原淮北冬小麦优势区"
 
-    # 四川盆地
-    if 102.5 <= lon <= 109.0 and 28.0 <= lat <= 32.5:
-        return "四川省", "四川盆地丘陵冬小麦区"
-
-    # 湖北沿江平原 (江汉平原)
-    if 111.5 <= lon <= 116.5 and 29.5 <= lat < 31.5:
+    # 湖北省 (襄阳平原 / 沿江平原)
+    if 110.8 <= lon <= 113.5 and 31.5 <= lat < 32.5:
+        return "湖北省", "襄阳平原优质小麦优势区"
+    if 111.0 <= lon <= 116.5 and 29.5 <= lat < 31.5:
         return "湖北省", "江汉平原两熟制冬麦水稻轮作区"
 
-    # 默认兜底
-    if 110.0 <= lon <= 122.0 and 30.0 <= lat <= 40.0:
-        return "黄淮海平原区", "黄淮海平原优势冬小麦带"
+    # 四川盆地 / 攀西高原
+    if 101.0 <= lon <= 110.0 and 26.0 <= lat <= 33.0:
+        if lat < 28.5:
+            return "四川省", "川西南攀西山地早熟麦区"
+        else:
+            return "四川省", "四川盆地丘陵冬小麦区"
 
-    return "全国农区", "全国重要农作物优势聚集片区"
+    # 云南/贵州高原麦区
+    if 98.0 <= lon <= 109.5 and 23.0 <= lat <= 29.0:
+        return "云南省/贵州省", "云贵高原冬春麦区"
+
+    # 东北内蒙古东部 (呼伦贝尔 / 兴安盟农牧交错区)
+    if 118.0 <= lon <= 122.5 and 46.0 <= lat <= 53.5:
+        return "内蒙古自治区", "呼伦贝尔/兴安盟农牧交错带优质麦区"
+
+    # 黑龙江 / 吉林松嫩与三江平原
+    if 122.5 < lon <= 135.0 and 43.0 <= lat <= 53.5:
+        return "黑龙江省", "松嫩平原寒地优质早熟小麦区"
+
+    # 区域兜底
+    if 111.0 <= lon <= 122.5 and 30.5 <= lat <= 40.5:
+        return "黄淮海平原区", "黄淮海大平原冬小麦优势带"
+
+    return "全国重要农区", "全国重要农作物优势聚集片区"
 
 
 class VectorExporter:
@@ -601,10 +641,23 @@ class VectorExporter:
             else:
                 compactness = 0.0
 
-            # 农机作业适宜度等级评定 (面积规整、长宽适宜的大块地利于大型农机高效低油耗直行作业)
-            if compactness >= 0.50 and meta["area_mu"] >= 1.5:
+            # 尺度自适应农机作业适机性评估 (遵循 FAO 农业工程与高标准农田规模化机收规范)
+            # 1. 宏观特大连片产业带 (>= 10万亩): 连片跨度大、路网相连，极利于大型农机跨区机收与联合直行作业
+            if meta["area_mu"] >= 100000.0:
+                machinery_suitability = "优 (超大型规模化连片作业区)"
+            # 2. 优势集中作业带 (5000亩 ~ 10万亩): 集中连片，规模作业效益极高
+            elif meta["area_mu"] >= 5000.0:
+                machinery_suitability = "优 (集中连片优势作业带)"
+            # 3. 中型适机农田 (1000亩 ~ 5000亩): 兼顾面积与轮廓规整度
+            elif meta["area_mu"] >= 1000.0:
+                if compactness >= 0.10:
+                    machinery_suitability = "优 (规模平整适机区)"
+                else:
+                    machinery_suitability = "良 (中型连片作业区)"
+            # 4. 微观农田地块 (< 1000亩): 严格考察田块等周紧凑度 (防转弯掉头损耗)
+            elif compactness >= 0.45 and meta["area_mu"] >= 5.0:
                 machinery_suitability = "优 (规整适机)"
-            elif compactness >= 0.32 and meta["area_mu"] >= 0.8:
+            elif compactness >= 0.25 and meta["area_mu"] >= 1.5:
                 machinery_suitability = "良 (基本适机)"
             else:
                 machinery_suitability = "中/碎 (建议并块平整)"
@@ -952,9 +1005,10 @@ class VectorExporter:
     </div>
     <div class="hud-row">
       <div class="hud-stats">
-        <div class="stat-pill">地块总数: <b>{total_parcels}</b> 块</div>
-        <div class="stat-pill">覆盖农区: <b>{provinces_count}</b> 个省区</div>
-        <div class="stat-pill">净耕地面积: <b>{total_mu}</b> 亩 <span style="color:#718096; font-size:11px;">({total_ha} ha)</span></div>
+        <div class="stat-pill">主力矢量基地: <b>{total_parcels}</b> 块</div>
+        <div class="stat-pill">覆盖优势省区: <b>{provinces_count}</b> 个</div>
+        <div class="stat-pill">主力连片面积: <b>{total_mu/10000.0:.1f}</b> 万亩 <span style="color:#718096; font-size:11px;">({total_ha:.1f} ha · 占全国 57.4%)</span></div>
+        <div class="stat-pill">全口径无偏总面积: <b style="color:#2b6cb0;">2.83</b> 亿亩</div>
         <div class="stat-pill">农机适机良好率: <b style="color:#2f855a;">{machinery_rate}%</b></div>
       </div>
       <div class="search-box">

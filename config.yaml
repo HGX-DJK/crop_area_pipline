@@ -48,6 +48,7 @@ segmentation:
   smooth_boundaries: true      # 是否开启 Chaikin 拐角切割拓扑平滑（消除栅格阶梯锯齿）
   min_parcel_area_m2: 200.0    # 最小合法地块面积阈值（平方米，200㎡ ≈ 0.3 亩，过滤噪声碎斑）
   max_parcel_area_m2: 500000.0 # 最大合法地块面积阈值（平方米，50 公顷）
+  max_export_parcels: 500      # 矢量化导出的主力核心地块最大数量上限（优先选取面积前 N 个主力产区，保障浏览器轻量秒开）
   connectivity: 8              # 连通域拓扑连接方式（4连通或8连通）
 
 preprocessing:

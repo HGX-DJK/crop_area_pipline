@@ -19,6 +19,7 @@ class ParcelSegmenter:
         self.apply_erosion = seg_cfg.get("apply_boundary_erosion", True)
         self.min_area_m2 = seg_cfg.get("min_parcel_area_m2", 200.0)
         self.max_area_m2 = seg_cfg.get("max_parcel_area_m2", 500000.0)
+        self.max_export_parcels = seg_cfg.get("max_export_parcels", 500)
         self.connectivity = seg_cfg.get("connectivity", 8)
         self.spatial_res = self.config.get("spatial", {}).get("resolution_meters", 10.0)
         self.pixel_area_m2 = self.spatial_res * self.spatial_res  # 10m x 10m = 100 m²
@@ -90,14 +91,22 @@ class ParcelSegmenter:
         parcel_metadata = []
         valid_parcel_id = 1
 
-        # 统计每个斑块的像素数量
+        # 统计每个斑块的像素数量与物理面积
         component_sizes = ndimage.sum(np.ones_like(labeled_array), labeled_array, range(1, num_features + 1))
+        total_candidate_m2 = float(np.sum(component_sizes)) * self.pixel_area_m2
+        total_candidate_mu = total_candidate_m2 * 0.0015
 
-        # 若候选斑块极多（如宏观全国图数千个），按面积从大到小优选前 500 个主力地块要素，确保秒级矢量化与 Web 地图极速加载
-        comp_indices = list(range(1, num_features + 1))
-        if num_features > 500:
-            comp_indices = sorted(comp_indices, key=lambda cid: component_sizes[cid - 1], reverse=True)[:500]
-            print(f"[地块分割] 候选斑块数量较多 ({num_features}个)，自动优选面积前 500 个主力农田区片进行高精度矢量化。")
+        # 按面积从大到小优选主力地块要素，确保秒级矢量化与 Web 地图极速加载
+        comp_indices = sorted(list(range(1, num_features + 1)), key=lambda cid: component_sizes[cid - 1], reverse=True)
+        if len(comp_indices) > self.max_export_parcels:
+            selected_indices = comp_indices[:self.max_export_parcels]
+            residual_indices = comp_indices[self.max_export_parcels:]
+            selected_m2 = float(sum(component_sizes[cid - 1] for cid in selected_indices)) * self.pixel_area_m2
+            residual_m2 = float(sum(component_sizes[cid - 1] for cid in residual_indices)) * self.pixel_area_m2
+            print(f"[地块分割] 候选斑块数量较多 ({num_features}个，全量连通面积约 {total_candidate_mu/10000.0:.1f} 万亩)：")
+            print(f"           - 优选面积前 {self.max_export_parcels} 个主力核心集中区进行高精度矢量化（约 {selected_m2*0.0015/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
+            print(f"           - 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {residual_m2*0.0015/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
+            comp_indices = selected_indices
 
         for comp_id in comp_indices:
             pixel_count = component_sizes[comp_id - 1]
