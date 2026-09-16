@@ -820,18 +820,40 @@ class VectorExporter:
     /* 顶部数字驾驶舱看板 */
     .top-hud {{
       position: absolute; top: 12px; left: 60px; right: 15px; z-index: 1000;
-      background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(8px);
-      padding: 10px 18px; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+      background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(10px);
+      padding: 10px 16px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.16);
+      display: flex; flex-direction: column; gap: 8px;
+    }}
+    .hud-row {{
       display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
     }}
     .hud-title {{
-      font-size: 15px; font-weight: bold; color: #1a365d; display: flex; align-items: center; gap: 6px;
+      font-size: 15px; font-weight: bold; color: #1a365d; display: flex; align-items: center; gap: 8px;
     }}
+    .hud-tag {{
+      font-size: 11px; font-weight: 500; color: #4a5568; background: #edf2f7; padding: 2px 7px; border-radius: 4px;
+    }}
+    
+    /* 底图胶囊切换器 */
+    .basemap-group {{
+      display: flex; align-items: center; background: #e2e8f0; border-radius: 8px; padding: 2px; gap: 2px;
+    }}
+    .basemap-btn {{
+      background: transparent; border: none; padding: 4px 10px; border-radius: 6px;
+      font-size: 12px; font-weight: 500; color: #4a5568; cursor: pointer; transition: all 0.2s;
+    }}
+    .basemap-btn:hover {{
+      background: #cbd5e0; color: #1a202c;
+    }}
+    .basemap-btn.active {{
+      background: #3182ce; color: #ffffff; font-weight: bold; box-shadow: 0 2px 6px rgba(49,130,206,0.35);
+    }}
+
     .hud-stats {{
-      display: flex; align-items: center; gap: 12px;
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
     }}
     .stat-pill {{
-      background: #edf2f7; padding: 4px 10px; border-radius: 6px; font-size: 12px; color: #2d3748;
+      background: #f7fafc; border: 1px solid #e2e8f0; padding: 3px 8px; border-radius: 6px; font-size: 12px; color: #2d3748;
     }}
     .stat-pill b {{ color: #2b6cb0; font-size: 13px; }}
 
@@ -843,6 +865,13 @@ class VectorExporter:
       padding: 5px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 12px; outline: none; width: 170px;
     }}
     .search-input:focus {{ border-color: #3182ce; box-shadow: 0 0 0 2px rgba(49,130,206,0.2); }}
+    .btn-action {{
+      border: none; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+    }}
+    .btn-primary {{ background: #3182ce; color: #fff; }}
+    .btn-primary:hover {{ background: #2b6cb0; }}
+    .btn-success {{ background: #38a169; color: #fff; }}
+    .btn-success:hover {{ background: #2f855a; }}
 
     /* 图例与图层控制器 */
     .legend-panel {{
@@ -858,14 +887,20 @@ class VectorExporter:
 
     /* 右侧 Top 10 主力基地导航浮窗 */
     .top10-panel {{
-      position: absolute; top: 75px; right: 15px; z-index: 999;
-      background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(8px);
-      padding: 12px 14px; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.18);
-      max-width: 260px; max-height: 480px; overflow-y: auto;
+      position: absolute; top: 110px; right: 15px; z-index: 999;
+      background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(8px);
+      padding: 10px 12px; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+      width: 260px; max-height: calc(100vh - 140px); overflow-y: auto; transition: top 0.2s ease;
     }}
     .top10-title {{
       font-weight: bold; font-size: 13px; color: #1a202c; margin-bottom: 8px;
-      display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #e2e8f0; padding-bottom: 5px;
+      display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px;
+      cursor: pointer; user-select: none;
+    }}
+    .top10-title:hover {{ color: #3182ce; }}
+    .top10-toggle-btn {{
+      font-size: 11px; font-weight: normal; color: #3182ce; background: #ebf8ff;
+      padding: 2px 6px; border-radius: 4px; border: 1px solid #bee3f8;
     }}
     .top10-item {{
       display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
@@ -904,30 +939,41 @@ class VectorExporter:
 
   <!-- 顶部数字驾驶舱 HUD -->
   <div class="top-hud">
-    <div class="hud-title">
-      <span>🌾 农田地块数字驾驶舱</span>
-      <span style="font-size:11px; font-weight:normal; color:#718096;">(遵循联合国遥感手册标准)</span>
+    <div class="hud-row">
+      <div class="hud-title">
+        <span>🌾 农田地块数字驾驶舱</span>
+        <span class="hud-tag">联合国农业遥感手册 (GSARS)</span>
+      </div>
+      <div class="basemap-group">
+        <button id="btn-base-esri" class="basemap-btn active" onclick="switchBaseMap('esri')">🛰️ 遥感底图</button>
+        <button id="btn-base-dark" class="basemap-btn" onclick="switchBaseMap('dark')">🌃 科技暗夜</button>
+        <button id="btn-base-osm" class="basemap-btn" onclick="switchBaseMap('osm')">🗺️ 电子地图</button>
+      </div>
     </div>
-    <div class="hud-stats">
-      <div class="stat-pill">地块总数: <b>{total_parcels}</b> 块</div>
-      <div class="stat-pill">覆盖农区: <b>{provinces_count}</b> 个省区</div>
-      <div class="stat-pill">净耕地面积: <b>{total_mu}</b> 亩 <span style="color:#718096;">({total_ha} ha)</span></div>
-      <div class="stat-pill">农机适机良好率: <b style="color:#2f855a;">{machinery_rate}%</b></div>
-    </div>
-    <div class="search-box">
-      <input type="text" id="parcelSearch" class="search-input" placeholder="输入地块号(如 P0001)搜索..." onkeypress="if(event.keyCode==13) searchParcel()" />
-      <button onclick="searchParcel()" style="background:#3182ce; color:#fff; border:none; border-radius:6px; padding:5px 10px; font-size:12px; cursor:pointer;">定位</button>
-      <button onclick="downloadGeoJSON()" title="下载矢量 GeoJSON" style="background:#48bb78; color:#fff; border:none; border-radius:6px; padding:5px 8px; font-size:12px; cursor:pointer;">📥 导出</button>
+    <div class="hud-row">
+      <div class="hud-stats">
+        <div class="stat-pill">地块总数: <b>{total_parcels}</b> 块</div>
+        <div class="stat-pill">覆盖农区: <b>{provinces_count}</b> 个省区</div>
+        <div class="stat-pill">净耕地面积: <b>{total_mu}</b> 亩 <span style="color:#718096; font-size:11px;">({total_ha} ha)</span></div>
+        <div class="stat-pill">农机适机良好率: <b style="color:#2f855a;">{machinery_rate}%</b></div>
+      </div>
+      <div class="search-box">
+        <input type="text" id="parcelSearch" class="search-input" placeholder="输入地块号(如 P0001)搜索..." onkeypress="if(event.keyCode==13) searchParcel()" />
+        <button onclick="searchParcel()" class="btn-action btn-primary">🔍 定位</button>
+        <button onclick="downloadGeoJSON()" title="下载矢量 GeoJSON" class="btn-action btn-success">📥 导出</button>
+      </div>
     </div>
   </div>
 
   <!-- 右侧 Top 10 主力基地导航浮窗 -->
   <div class="top10-panel">
-    <div class="top10-title">
+    <div class="top10-title" onclick="toggleTop10()" title="点击展开/收起核心产区直达列表">
       <span>🏆 核心产区直达 (Top 10)</span>
-      <span style="font-size:10px; color:#718096; font-weight:normal;">点击飞行聚焦</span>
+      <span id="top10-toggle-btn" class="top10-toggle-btn">收起 🔼</span>
     </div>
-    {top10_html}
+    <div id="top10-list-container">
+      {top10_html}
+    </div>
   </div>
 
   <!-- 左下角作物图例与交互筛选 -->
@@ -963,12 +1009,61 @@ class VectorExporter:
       layers: [esriSat]
     }});
 
-    var baseMaps = {{
-      "🛰️ 高清遥感底图 (Esri)": esriSat,
-      "🌃 科技暗夜驾驶舱 (CartoDB)": cartoDark,
-      "🗺️ 矢量行政地图 (OSM)": osm
-    }};
-    L.control.layers(baseMaps, null, {{ position: 'topright' }}).addTo(map);
+    // 底图切换控制函数
+    var currentBaseMap = 'esri';
+    function switchBaseMap(type) {{
+      if (type === currentBaseMap) return;
+      if (type === 'esri') {{
+        map.removeLayer(cartoDark);
+        map.removeLayer(osm);
+        map.addLayer(esriSat);
+        esriSat.bringToBack();
+      }} else if (type === 'dark') {{
+        map.removeLayer(esriSat);
+        map.removeLayer(osm);
+        map.addLayer(cartoDark);
+        cartoDark.bringToBack();
+      }} else if (type === 'osm') {{
+        map.removeLayer(esriSat);
+        map.removeLayer(cartoDark);
+        map.addLayer(osm);
+        osm.bringToBack();
+      }}
+      currentBaseMap = type;
+      document.querySelectorAll('.basemap-btn').forEach(function(b) {{
+        b.classList.remove('active');
+      }});
+      var activeBtn = document.getElementById('btn-base-' + type);
+      if (activeBtn) activeBtn.classList.add('active');
+    }}
+
+    // Top 10 列表折叠与展开
+    var isTop10Collapsed = false;
+    function toggleTop10() {{
+      var list = document.getElementById('top10-list-container');
+      var btn = document.getElementById('top10-toggle-btn');
+      isTop10Collapsed = !isTop10Collapsed;
+      if (isTop10Collapsed) {{
+        list.style.display = 'none';
+        btn.innerText = '展开 🔽';
+      }} else {{
+        list.style.display = 'block';
+        btn.innerText = '收起 🔼';
+      }}
+    }}
+
+    // 动态校准 Top 10 面板垂直位置，彻底杜绝 HUD 遮挡
+    function adjustTop10Position() {{
+      var hud = document.querySelector('.top-hud');
+      var top10 = document.querySelector('.top10-panel');
+      if (hud && top10) {{
+        var newTop = hud.offsetTop + hud.offsetHeight + 12;
+        top10.style.top = newTop + 'px';
+        top10.style.maxHeight = 'calc(100vh - ' + (newTop + 25) + 'px)';
+      }}
+    }}
+    window.addEventListener('resize', adjustTop10Position);
+    setTimeout(adjustTop10Position, 200);
 
     function getSuitabilityBadge(suitability) {{
       if (suitability.indexOf("优") >= 0) return '<span class="parcel-badge badge-opt">' + suitability + '</span>';
@@ -1098,7 +1193,6 @@ class VectorExporter:
             f.write(html_template)
         print(f"[交互地图] 已成功生成数字农情驾驶舱 Web 卫星地图: {output_html_path}")
         print(f"           (新增 Top 10 主力基地一键直达导航、三套底图自由切换、省份农区卡片)")
-        return output_html_path
         return output_html_path
 
     def export_geotiff(self, classified_mask, geo_info, output_tif_path="output/crop_classification_map.tif"):
