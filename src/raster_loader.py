@@ -10,6 +10,12 @@ import re
 import glob
 import numpy as np
 
+from src.utils.geo_utils import (
+    parse_temporal_doy,
+    is_geographic_system,
+    estimate_resolution_meters,
+)
+
 # 优雅导入地理空间处理库，若未安装则提供友好提示
 try:
     import rasterio
@@ -62,27 +68,17 @@ class RasterLoader:
         for idx, tif_path in enumerate(tif_files):
             fname = os.path.basename(tif_path)
             
-            # 解析日期或 DOY
-            doy_match = re.search(r"doy[_-]?(\d+)", fname, re.IGNORECASE)
-            date_match = re.search(r"(\d{4})(\d{2})(\d{2})", fname)
-            
-            if doy_match:
-                doy = int(doy_match.group(1))
-            elif date_match:
-                import pandas as pd
-                y, m, d = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
-                doy = int(pd.Timestamp(year=y, month=m, day=d).dayofyear)
-            else:
-                doy = (idx + 1) * 30  # 默认间距
+            # 解析日期或 DOY (基于 utils.geo_utils)
+            doy = parse_temporal_doy(fname, default_doy=(idx + 1) * 30)
 
             with rasterio.open(tif_path) as src:
                 # 记录第一景影像的地理空间元数据
                 if idx == 0:
-                    is_geo = src.crs.is_geographic if src.crs else False
+                    is_geo = src.crs.is_geographic if src.crs else is_geographic_system(self.spatial_cfg.get("crs", ""))
                     res_x = abs(src.transform[0])
                     res_y = abs(src.transform[4])
                     # 若为地理坐标系(度)，估算赤道/中纬度每度对应米数 (1度 ≈ 111320米)
-                    res_meters = res_x * 111320.0 if is_geo else res_x
+                    res_meters = estimate_resolution_meters(res_x, is_geographic=is_geo)
 
                     geo_info = {
                         "crs": str(src.crs) if src.crs else self.spatial_cfg.get("crs", "EPSG:32650"),

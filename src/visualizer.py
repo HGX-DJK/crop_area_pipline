@@ -11,20 +11,17 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 import numpy as np
 
-# 自动配置跨平台中文字体支持（适配 Windows 微软雅黑/黑体、Linux Noto/文泉驿、macOS 苹方）
-plt.rcParams['font.sans-serif'] = [
-    'Microsoft YaHei',    # Windows 首选微软雅黑
-    'SimHei',             # Windows 经典黑体
-    'SimSun',             # Windows 宋体
-    'WenQuanYi Micro Hei',# Linux/Docker 文泉驿
-    'Noto Sans CJK SC',   # Linux 常用无衬线中文
-    'PingFang SC',        # macOS
-    'sans-serif'
-]
-plt.rcParams['axes.unicode_minus'] = False  # 确保负号 '-' 正常渲染而不显示为方块
+from src.utils.plot_utils import (
+    setup_chinese_fonts,
+    get_crop_colormap,
+    downsample_raster_preview,
+)
+
+# 自动配置跨平台中文字体支持（Windows 微软雅黑、Linux Noto/文泉驿、macOS 苹方）
+setup_chinese_fonts()
+
 
 
 class Visualizer:
@@ -73,28 +70,12 @@ class Visualizer:
         """绘制全域农作物像素级种植分类专题图。"""
         fig, ax = plt.subplots(figsize=(8, 7))
         
-        # 动态自适应类别调色盘：支持从少量作物到 20+ 种复杂农作体系
+        # 动态自适应类别调色盘与超大幅宽自适应快速降采样
         unique_classes = sorted(list(self.crop_legend.keys()))
         num_classes = max(len(unique_classes), int(np.max(crop_classified_mask)) + 1)
-        base_palette = [
-            "#ecf0f1", "#f39c12", "#2ecc71", "#3498db",  # 0:背景, 1:玉米, 2:小麦, 3:大豆
-            "#1abc9c", "#e74c3c", "#9b59b6", "#f1c40f",  # 4:水稻, 5:油菜, 6:棉花, 7:花生
-            "#16a085", "#d35400", "#8e44ad", "#27ae60",  # 8:马铃薯, 9:向日葵, 10:甜菜, 11:甘蔗
-            "#7f8c8d", "#c0392b", "#2980b9", "#f368e0"   # 12:设施大棚, 13:蔬菜, 14:果茶园, 15:杂粮
-        ]
-        if num_classes <= len(base_palette):
-            palette = base_palette[:num_classes]
-        else:
-            cmap_obj = plt.get_cmap("tab20")
-            palette = [cmap_obj(i % 20) for i in range(num_classes)]
-            palette[0] = "#ecf0f1"  # 保持背景为灰白色
+        cmap = get_crop_colormap(num_classes)
+        disp_mask = downsample_raster_preview(crop_classified_mask, max_dim=1200)
 
-        # 对于百万级超大幅宽遥感影像，自动降采样绘制预览图，保证秒级保存与低显存占用
-        h, w = crop_classified_mask.shape
-        step = max(1, max(h, w) // 1200)
-        disp_mask = crop_classified_mask[::step, ::step] if step > 1 else crop_classified_mask
-
-        cmap = ListedColormap(palette)
         im = ax.imshow(disp_mask, cmap=cmap, vmin=-0.5, vmax=num_classes - 0.5, interpolation="nearest")
 
         ax.set_title("遥感全域农作物种植分布分类图", fontsize=13, fontweight="bold", pad=12)
@@ -125,10 +106,8 @@ class Visualizer:
         else:
             peak_ndvi = raster_cube_peak
 
-        h, w = parcel_id_mask.shape
-        step = max(1, max(h, w) // 1200)
-        disp_ndvi = peak_ndvi[::step, ::step] if step > 1 else peak_ndvi
-        disp_parcels = parcel_id_mask[::step, ::step] if step > 1 else parcel_id_mask
+        disp_ndvi = downsample_raster_preview(peak_ndvi, max_dim=1200)
+        disp_parcels = downsample_raster_preview(parcel_id_mask, max_dim=1200)
 
         ax.imshow(disp_ndvi, cmap="YlGn", vmin=0.1, vmax=0.9)
 

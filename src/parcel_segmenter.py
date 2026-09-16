@@ -11,6 +11,8 @@
 import numpy as np
 from scipy import ndimage
 
+from src.utils.unit_utils import sqm_to_mu, sqm_to_ha
+
 
 class ParcelSegmenter:
     def __init__(self, config=None):
@@ -81,8 +83,8 @@ class ParcelSegmenter:
         if self.pixel_area_m2 > self.max_area_m2:
             eff_min_area = self.pixel_area_m2 * 1.0
             eff_max_area = self.pixel_area_m2 * 20000.0
-            print(f"[地块分割自适应] 当前输入影像为宏观尺度遥感图 (像元跨度: {self.spatial_res:.1f}米，单像元面积: {self.pixel_area_m2*0.0015:.1f}亩)，")
-            print(f"                 已自动将地块过滤上下限动态调整为 {eff_min_area*0.0015:.1f} ~ {eff_max_area*0.0015:.1f} 亩。")
+            print(f"[地块分割自适应] 当前输入影像为宏观尺度遥感图 (像元跨度: {self.spatial_res:.1f}米，单像元面积: {sqm_to_mu(self.pixel_area_m2, 1):.1f}亩)，")
+            print(f"                 已自动将地块过滤上下限动态调整为 {sqm_to_mu(eff_min_area, 1):.1f} ~ {sqm_to_mu(eff_max_area, 1):.1f} 亩。")
         else:
             eff_min_area = self.min_area_m2
             eff_max_area = self.max_area_m2
@@ -94,7 +96,7 @@ class ParcelSegmenter:
         # 统计每个斑块的像素数量与物理面积
         component_sizes = ndimage.sum(np.ones_like(labeled_array), labeled_array, range(1, num_features + 1))
         total_candidate_m2 = float(np.sum(component_sizes)) * self.pixel_area_m2
-        total_candidate_mu = total_candidate_m2 * 0.0015
+        total_candidate_mu = sqm_to_mu(total_candidate_m2, 2)
 
         # 按面积从大到小优选主力地块要素，确保秒级矢量化与 Web 地图极速加载
         comp_indices = sorted(list(range(1, num_features + 1)), key=lambda cid: component_sizes[cid - 1], reverse=True)
@@ -104,8 +106,8 @@ class ParcelSegmenter:
             selected_m2 = float(sum(component_sizes[cid - 1] for cid in selected_indices)) * self.pixel_area_m2
             residual_m2 = float(sum(component_sizes[cid - 1] for cid in residual_indices)) * self.pixel_area_m2
             print(f"[地块分割] 候选斑块数量较多 ({num_features}个，全量连通面积约 {total_candidate_mu/10000.0:.1f} 万亩)：")
-            print(f"           - 优选面积前 {self.max_export_parcels} 个主力核心集中区进行高精度矢量化（约 {selected_m2*0.0015/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
-            print(f"           - 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {residual_m2*0.0015/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
+            print(f"           - 优选面积前 {self.max_export_parcels} 个主力核心集中区进行高精度矢量化（约 {sqm_to_mu(selected_m2)/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
+            print(f"           - 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {sqm_to_mu(residual_m2)/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
             comp_indices = selected_indices
 
         for comp_id in comp_indices:
@@ -133,9 +135,9 @@ class ParcelSegmenter:
             # 计算平均置信度
             mean_conf = float(np.mean(confidence_map[comp_mask])) if confidence_map is not None else 1.0
 
-            # 换算中国通用农业面积单位：1 亩 = 666.67 平方米 = 1/15 公顷
-            area_mu = round(area_m2 * 0.0015, 2)
-            area_hectares = round(area_m2 / 10000.0, 4)
+            # 换算中国通用农业面积单位：1 亩 = 666.67 平方米 = 1/15 公顷 (统一计量工具)
+            area_mu = sqm_to_mu(area_m2, decimals=2)
+            area_hectares = sqm_to_ha(area_m2, decimals=4)
 
             parcel_metadata.append({
                 "parcel_id": f"P{valid_parcel_id:04d}",

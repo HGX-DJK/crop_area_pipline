@@ -12,6 +12,8 @@ import os
 import numpy as np
 import pandas as pd
 
+from src.utils.unit_utils import MU_PER_SQM
+
 
 class CropRotationTracker:
     def __init__(self, config=None):
@@ -22,8 +24,7 @@ class CropRotationTracker:
             2: "冬小麦",
             3: "大豆"
         })
-        self.spatial_res = self.config.get("spatial", {}).get("resolution_meters", 10.0)
-        self.pixel_area_mu = (self.spatial_res * self.spatial_res) * 0.0015
+        self.pixel_area_mu = (self.spatial_res * self.spatial_res) * MU_PER_SQM
 
     def analyze_transition(self, mask_year_early, mask_year_late, year_early=2020, year_late=2023):
         """

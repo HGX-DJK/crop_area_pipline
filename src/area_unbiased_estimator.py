@@ -12,6 +12,8 @@
 import numpy as np
 import pandas as pd
 
+from src.utils.unit_utils import sqm_to_mu, sqm_to_ha
+
 
 class AreaUnbiasedEstimator:
     def __init__(self, config=None):
@@ -134,11 +136,11 @@ class AreaUnbiasedEstimator:
             ci_low_m2 = np.percentile(boot_calibrated_m2[:, idx], low_pct)
             ci_high_m2 = np.percentile(boot_calibrated_m2[:, idx], high_pct)
 
-            # 转换为“亩”与“公顷”
-            naive_mu = round(naive_m2 * 0.0015, 1)
-            calib_mu = round(calib_m2 * 0.0015, 1)
-            ci_low_mu = round(ci_low_m2 * 0.0015, 1)
-            ci_high_mu = round(ci_high_m2 * 0.0015, 1)
+            # 转换为“亩”与“公顷” (基于统一计量工具)
+            naive_mu = sqm_to_mu(naive_m2, decimals=1)
+            calib_mu = sqm_to_mu(calib_m2, decimals=1)
+            ci_low_mu = sqm_to_mu(ci_low_m2, decimals=1)
+            ci_high_mu = sqm_to_mu(ci_high_m2, decimals=1)
             
             bias_mu = round(naive_mu - calib_mu, 1)
             bias_pct = round((bias_mu / max(calib_mu, 1e-4)) * 100.0, 2)
@@ -148,9 +150,9 @@ class AreaUnbiasedEstimator:
                 "crop_name": c_name,
                 "naive_pixel_count": int(map_pixel_dict.get(cid, 0)),
                 "naive_area_mu": naive_mu,
-                "naive_area_ha": round(naive_m2 / 10000.0, 2),
+                "naive_area_ha": sqm_to_ha(naive_m2, decimals=2),
                 "unbiased_calibrated_mu": calib_mu,
-                "unbiased_calibrated_ha": round(calib_m2 / 10000.0, 2),
+                "unbiased_calibrated_ha": sqm_to_ha(calib_m2, decimals=2),
                 "ci_95_lower_mu": ci_low_mu,
                 "ci_95_upper_mu": ci_high_mu,
                 "bias_mu": bias_mu,
