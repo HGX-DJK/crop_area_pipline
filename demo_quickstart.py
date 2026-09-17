@@ -133,29 +133,57 @@ def run_quickstart():
     print(f"  -> 成功提取 {len(parcels_info)} 个规范零碎农田地块，累计耕地面积: {total_cultivated_mu:.1f} 亩。")
 
     # -------------------------------------------------------------
-    # 4. 联合国手册第 24/26 章加权无偏面积统计校准
+    # 4. 联合国手册第 24/26 章加权无偏面积统计校准 (Weighted Area Estimator)
     # -------------------------------------------------------------
     print("\n[4/4] 执行联合国手册加权样框无偏面积校准（修正小地块边缘像元混淆）...")
-    # 统计朴素像元面积与校准面积
-    print("\n" + "=" * 74)
+
+    # 模拟从全域抽取少量概率抽样检验样方 (120个样点)，获取真实地表与地图分类对照
+    val_indices = np.random.choice(len(y_all), size=120, replace=False)
+    y_val_map = pred_mask.flatten()[val_indices]
+    y_val_true = gt_mask.flatten()[val_indices]
+
+    # 构建条件误差转移概率矩阵 P(True=j | Map=i)
+    all_codes = [0, 1, 2, 3]
+    cond_matrix = np.zeros((len(all_codes), len(all_codes)))
+    for i_idx, i_cls in enumerate(all_codes):
+        mask_i = (y_val_map == i_cls)
+        denom = np.sum(mask_i)
+        if denom > 0:
+            for j_idx, j_cls in enumerate(all_codes):
+                cond_matrix[i_idx, j_idx] = np.sum(mask_i & (y_val_true == j_cls)) / denom
+        else:
+            cond_matrix[i_idx, i_idx] = 1.0
+
+    # 全域地图朴素面积向量
+    map_pixel_counts = np.array([np.sum(pred_mask == c) for c in all_codes], dtype=np.float64)
+    map_area_mu = map_pixel_counts * pixel_area_m2 * 0.0015
+
+    # 联合国手册加权校准无偏面积向量: A_calibrated = A_map @ Cond_Matrix
+    calibrated_area_mu = np.dot(map_area_mu, cond_matrix)
+
+    # 真实地表现场实际面积 (Ground Truth Area, 作为基准对照)
+    gt_pixel_counts = np.array([np.sum(gt_mask == c) for c in all_codes], dtype=np.float64)
+    gt_area_mu = gt_pixel_counts * pixel_area_m2 * 0.0015
+
+    # 统计朴素像元面积、校准面积与真实对照
+    print("\n" + "=" * 82)
     print("📊 联合国统计司 / 粮农组织（FAO）农作物种植面积无偏统计台账")
-    print("=" * 74)
-    print(f"{'作物类型':<10} | {'像元计数(亩)':<14} | {'联合国无偏校准面积(亩)':<18} | {'修正幅度'}")
-    print("-" * 74)
+    print("=" * 82)
+    print(f"{'作物类型':<10} | {'朴素像元面积':<12} | {'联合国无偏校准面积':<16} | {'真实地表参考':<12} | {'误差校正'}")
+    print("-" * 82)
     
     for c_code in [1, 2, 3]:
         c_name = crop_names[c_code]
-        naive_count = np.sum(pred_mask == c_code)
-        naive_mu = round(naive_count * pixel_area_m2 * 0.0015, 1)
-        # 模拟样框转移矩阵校准后的无偏值（通常消除了田埂混合像元的系统偏差）
-        calib_factor = 0.94 if c_code == 1 else (0.96 if c_code == 2 else 0.92)
-        calib_mu = round(naive_mu * calib_factor, 1)
+        naive_mu = round(map_area_mu[c_code], 1)
+        calib_mu = round(calibrated_area_mu[c_code], 1)
+        true_mu = round(gt_area_mu[c_code], 1)
         diff = round(naive_mu - calib_mu, 1)
-        print(f"{c_name:<10} | {naive_mu:<16.1f} | {calib_mu:<20.1f} | 剔除虚高 {diff:+.1f} 亩")
+        corr_str = f"修正 {diff:+.1f} 亩"
+        print(f"{c_name:<10} | {naive_mu:<14.1f} | {calib_mu:<18.1f} | {true_mu:<14.1f} | {corr_str}")
 
-    print("-" * 74)
-    print("✅ 演示成功！已验证多时相遥感物候识别、零碎地块田埂自动切分与无偏面积校准算法。")
-    print("=" * 76 + "\n")
+    print("-" * 82)
+    print("✅ 演示成功！已验证多时相遥感物候识别、零碎地块田埂自动切分与联合国数学无偏面积校准。")
+    print("=" * 82 + "\n")
 
 
 if __name__ == "__main__":

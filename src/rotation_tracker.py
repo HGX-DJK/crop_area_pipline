@@ -18,6 +18,7 @@ from src.utils.unit_utils import MU_PER_SQM
 class CropRotationTracker:
     def __init__(self, config=None):
         self.config = config or {}
+        self.spatial_res = (self.config.get("spatial") or {}).get("resolution_meters", 10.0)
         self.crop_legend = self.config.get("crop_legend", {
             0: "非农田/背景/休耕",
             1: "夏玉米",
@@ -63,29 +64,33 @@ class CropRotationTracker:
         # 业务洞察提炼
         compliance_records = []
 
-        # 1. 粮豆轮作分析 (如玉米/小麦 -> 大豆)
-        grain_codes = [1, 2] # 玉米、小麦
-        soybean_code = 3     # 大豆
-        grain_to_soy_mask = np.isin(mask_year_early, grain_codes) & (mask_year_late == soybean_code)
-        grain_to_soy_mu = round(np.sum(grain_to_soy_mask) * self.pixel_area_mu, 1)
-        compliance_records.append({
-            "监测类型": "🌾 粮豆健康轮作",
-            "业务定义": f"{year_early}年粮食(小麦/玉米) -> {year_late}年大豆",
-            "涉及面积(亩)": grain_to_soy_mu,
-            "业务建议": "建议纳入国家大豆玉米带状复合种植/轮作补贴核发白名单"
-        })
+        # 1. 粮豆轮作分析 (如粮食 -> 大豆/豆类作物)
+        soy_codes = [c for c, name in self.crop_legend.items() if "豆" in str(name) or c == 3]
+        grain_codes = [c for c in unique_codes if c != 0 and c not in soy_codes]
+        if soy_codes and grain_codes:
+            grain_to_soy_mask = np.isin(mask_year_early, grain_codes) & np.isin(mask_year_late, soy_codes)
+            grain_to_soy_mu = round(np.sum(grain_to_soy_mask) * self.pixel_area_mu, 1)
+            compliance_records.append({
+                "监测类型": "🌾 粮豆健康轮作",
+                "业务定义": f"{year_early}年主要粮食 -> {year_late}年大豆/豆类",
+                "涉及面积(亩)": grain_to_soy_mu,
+                "业务建议": "建议纳入国家大豆玉米带状复合种植/轮作补贴核发白名单"
+            })
 
-        # 2. 连作障碍分析 (如玉米->玉米, 大豆->大豆)
-        for c in [1, 3]:
-            c_name = self.crop_legend.get(c, str(c))
+        # 2. 连作障碍分析 (自适应考察所有农作物的连续重茬种植)
+        for c in unique_codes:
+            if c == 0:
+                continue
+            c_name = self.crop_legend.get(c, f"作物_{c}")
             mono_mask = (mask_year_early == c) & (mask_year_late == c)
             mono_mu = round(np.sum(mono_mask) * self.pixel_area_mu, 1)
-            compliance_records.append({
-                "监测类型": f"⚠️ 连作重茬地块 ({c_name})",
-                "业务定义": f"{year_early}年与{year_late}年连续重茬种植{c_name}",
-                "涉及面积(亩)": mono_mu,
-                "业务建议": "提示土传病害风险，建议下期实施深松改土或间套轮作"
-            })
+            if mono_mu > 0:
+                compliance_records.append({
+                    "监测类型": f"⚠️ 连作重茬地块 ({c_name})",
+                    "业务定义": f"{year_early}年与{year_late}年连续重茬种植{c_name}",
+                    "涉及面积(亩)": mono_mu,
+                    "业务建议": "提示土传病害与地力透支风险，建议下期实施深松改土或间套轮作"
+                })
 
         # 3. 疑似撂荒休耕监测 (农田 -> 连续多年背景/杂草裸地)
         cropland_early = (mask_year_early > 0)

@@ -154,10 +154,11 @@ class CropClassifier:
             valid_indices = np.where(valid_mask)[0]
             X_valid = X_flat[valid_indices]
 
-            # 针对有效像元执行分批流式推断
+            # 针对有效像元执行分批流式推断 (基于 predict_proba 单次遍历树模型，推理速度提升近一倍)
+            classes_arr = np.array(self.model.classes_)
             if valid_count <= batch_size:
-                preds_flat[valid_indices] = self.model.predict(X_valid)
                 probs_valid = self.model.predict_proba(X_valid)
+                preds_flat[valid_indices] = classes_arr[np.argmax(probs_valid, axis=1)]
                 max_probs[valid_indices] = np.max(probs_valid, axis=1)
             else:
                 for start_idx in range(0, valid_count, batch_size):
@@ -165,10 +166,8 @@ class CropClassifier:
                     chunk_X = X_valid[start_idx:end_idx]
                     chunk_indices = valid_indices[start_idx:end_idx]
 
-                    chunk_pred = self.model.predict(chunk_X)
                     chunk_prob = self.model.predict_proba(chunk_X)
-
-                    preds_flat[chunk_indices] = chunk_pred
+                    preds_flat[chunk_indices] = classes_arr[np.argmax(chunk_prob, axis=1)]
                     max_probs[chunk_indices] = np.max(chunk_prob, axis=1)
 
         predicted_mask = preds_flat.reshape(h, w).astype(np.int32)
