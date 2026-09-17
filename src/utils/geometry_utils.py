@@ -41,6 +41,9 @@ def trace_grid_boundary(binary_mask):
     rings = []
     remaining = {k: list(v) for k, v in edges.items()}
 
+    max_total_steps = sum(len(v) for v in edges.values()) + 10
+    total_steps = 0
+
     while True:
         start = None
         for k, v in remaining.items():
@@ -50,44 +53,51 @@ def trace_grid_boundary(binary_mask):
         if start is None:
             break
 
-    ring = [start]
-    curr = start
-    while True:
-        targets = remaining.get(curr, [])
-        if not targets:
-            break
-        
-        if len(targets) == 1:
-            nxt = targets.pop(0)
-        else:
-            # 鞍点/交叉口：计算进入向量与所有候选流出向量的夹角，优先最右侧（顺时针外边界）
-            if len(ring) >= 2:
-                dr_in = curr[0] - ring[-2][0]
-                dc_in = curr[1] - ring[-2][1]
-            else:
-                dr_in, dc_in = 0, 1
+        ring = [start]
+        curr = start
+        while True:
+            total_steps += 1
+            if total_steps > max_total_steps:
+                break
+
+            targets = remaining.get(curr, [])
+            if not targets:
+                break
             
-            best_t = None
-            best_angle = -999.0
-            for t in targets:
-                dr_out = t[0] - curr[0]
-                dc_out = t[1] - curr[1]
-                cross = dr_in * dc_out - dc_in * dr_out
-                dot = dr_in * dr_out + dc_in * dc_out
-                angle = np.arctan2(cross, dot)
-                if angle > best_angle:
-                    best_angle = angle
-                    best_t = t
-            nxt = best_t
-            targets.remove(nxt)
+            if len(targets) == 1:
+                nxt = targets.pop(0)
+            else:
+                # 鞍点/交叉口：计算进入向量与所有候选流出向量的夹角，优先最右侧（顺时针外边界）
+                if len(ring) >= 2:
+                    dr_in = curr[0] - ring[-2][0]
+                    dc_in = curr[1] - ring[-2][1]
+                else:
+                    dr_in, dc_in = 0, 1
+                
+                best_t = None
+                best_angle = -999.0
+                for t in targets:
+                    dr_out = t[0] - curr[0]
+                    dc_out = t[1] - curr[1]
+                    cross = dr_in * dc_out - dc_in * dr_out
+                    dot = dr_in * dr_out + dc_in * dc_out
+                    angle = np.arctan2(cross, dot)
+                    if angle > best_angle:
+                        best_angle = angle
+                        best_t = t
+                nxt = best_t
+                targets.remove(nxt)
 
-        ring.append(nxt)
-        curr = nxt
-        if curr == start:
+            ring.append(nxt)
+            curr = nxt
+            if curr == start:
+                break
+
+        if len(ring) >= 4 and ring[0] == ring[-1]:
+            rings.append(ring)
+
+        if total_steps > max_total_steps:
             break
-
-    if len(ring) >= 4 and ring[0] == ring[-1]:
-        rings.append(ring)
 
     if not rings:
         return []

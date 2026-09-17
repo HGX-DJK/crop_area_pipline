@@ -93,8 +93,12 @@ class ParcelSegmenter:
         parcel_metadata = []
         valid_parcel_id = 1
 
-        # 统计每个斑块的像素数量与物理面积
-        component_sizes = ndimage.sum(np.ones_like(labeled_array), labeled_array, range(1, num_features + 1))
+        # 统计每个斑块的像素数量与物理面积 (底层 C 级单次直方图统计极速加速，耗时从秒级降至毫秒级)
+        if num_features > 0:
+            counts = np.bincount(labeled_array.ravel())
+            component_sizes = counts[1:num_features + 1]
+        else:
+            component_sizes = np.array([], dtype=np.int64)
         total_candidate_m2 = float(np.sum(component_sizes)) * self.pixel_area_m2
         total_candidate_mu = sqm_to_mu(total_candidate_m2, 2)
 
@@ -110,6 +114,9 @@ class ParcelSegmenter:
             print(f"           - 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {sqm_to_mu(residual_m2)/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
             comp_indices = selected_indices
 
+        # 预计算各斑块的最小外包矩形切片，避免每次对全图进行几千万像素的大矩阵遍历
+        slices = ndimage.find_objects(labeled_array)
+
         for comp_id in comp_indices:
             pixel_count = component_sizes[comp_id - 1]
             area_m2 = pixel_count * self.pixel_area_m2
@@ -118,22 +125,33 @@ class ParcelSegmenter:
             if area_m2 < eff_min_area or area_m2 > eff_max_area:
                 continue
 
-            comp_mask = (labeled_array == comp_id)
-            parcel_id_mask[comp_mask] = valid_parcel_id
+            sl = slices[comp_id - 1]
+            if sl is None:
+                continue
+
+            sub_labeled = labeled_array[sl]
+            comp_mask_local = (sub_labeled == comp_id)
+
+            # 局部写入全局地块编号掩膜 (利用切片视图直接原地更新)
+            sub_parcel_id = parcel_id_mask[sl]
+            sub_parcel_id[comp_mask_local] = valid_parcel_id
 
             # 统计该地块内部的像元作物类别分布（多数投票原则）
-            crop_pixels = crop_classified_mask[comp_mask]
-            classes, counts = np.unique(crop_pixels, return_counts=True)
+            sub_crops = crop_classified_mask[sl][comp_mask_local]
+            classes, counts = np.unique(sub_crops, return_counts=True)
             dominant_class = int(classes[np.argmax(counts)])
-            purity = float(np.max(counts) / len(crop_pixels))
+            purity = float(np.max(counts) / len(sub_crops))
 
-            # 计算地块中心点像素坐标
-            coords = np.argwhere(comp_mask)
-            center_r = float(np.mean(coords[:, 0]))
-            center_c = float(np.mean(coords[:, 1]))
+            # 计算地块中心点像素坐标 (局部质心 + 切片原点偏移)
+            local_coords = np.argwhere(comp_mask_local)
+            center_r = float(np.mean(local_coords[:, 0]) + sl[0].start)
+            center_c = float(np.mean(local_coords[:, 1]) + sl[1].start)
 
             # 计算平均置信度
-            mean_conf = float(np.mean(confidence_map[comp_mask])) if confidence_map is not None else 1.0
+            if confidence_map is not None:
+                mean_conf = float(np.mean(confidence_map[sl][comp_mask_local]))
+            else:
+                mean_conf = 1.0
 
             # 换算中国通用农业面积单位：1 亩 = 666.67 平方米 = 1/15 公顷 (统一计量工具)
             area_mu = sqm_to_mu(area_m2, decimals=2)
