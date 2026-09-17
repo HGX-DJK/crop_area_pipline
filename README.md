@@ -66,8 +66,14 @@ crop_area_pipeline/
 ├── requirements.txt                           # 核心依赖 (numpy, scipy, scikit-learn, matplotlib, pyyaml, pandas)
 ├── config.yaml                                # 集中参数配置（像元分辨率、图例编码、形态学核、平滑参数）
 ├── demo_quickstart.py                         # 极简独立单文件演示脚本（内存仿真 80x80 零碎场景极速试跑）
-├── main.py                                    # 端到端主运行流水线调度器
+├── run_tests.py                               # 🌾 一键全系统自动化测试与健康自检执行器
+├── main.py                                    # 端到端主运行流水线调度器 (--track-rotation, --sample-plan, --self-check)
 ├── .gitignore                                 # 遥感大文件、中间缓存与运行产物智能过滤清单
+├── tests/                                     # 自动化单元测试与集成测试套件
+│   ├── test_geo_utils.py                      # WGS84与UTM坐标正反算严密性测试 (< 0.1 mm)
+│   ├── test_geometry_utils.py                 # 地块轮廓追踪、RDP与Chaikin平滑测试
+│   ├── test_unbiased_estimator.py             # Olofsson (2014) 无偏推断与 Neyman 最佳抽样分配测试
+│   └── test_pipeline_e2e.py                   # 端到端流水线快速集成回归测试
 ├── data/                                      # 数据目录（内置真实/模拟基准测试集）
 │   ├── sample_phenology_curves.csv            # 典型作物多时相物候基准曲线库
 │   ├── sample_training_points.csv             # 训练样本点（多时相特征与标签）
@@ -78,8 +84,9 @@ crop_area_pipeline/
 │   ├── time_series_builder.py                 # 多时相卫星时序立方体构建与物候特征工程
 │   ├── crop_classifier.py                     # 多时相作物识别引擎（随机森林 / 梯度提升，自适应特征对齐）
 │   ├── parcel_segmenter.py                    # 零碎地块形态学切分与田埂分离（手册第8章，自适应尺度调节）
-│   ├── vector_exporter.py                     # 地块 Chaikin 平滑矢量化、省份农区归属、WebGIS 驾驶舱生成
-│   ├── area_unbiased_estimator.py             # 联合国第24/26章两阶段分层无偏面积校准引擎
+│   ├── vector_exporter.py                     # 地块 Chaikin 平滑矢量化与属性台账导出
+│   ├── webgis_builder.py                      # 🌐 数字农情 WebGIS 空间驾驶舱纯前端独立构建器
+│   ├── area_unbiased_estimator.py             # 联合国第24/26章两阶段分层无偏校准与 Neyman 抽样设计引擎
 │   ├── report_generator.py                    # 出版级全国冬小麦空间监测与决策分析 HTML 专报生成器
 │   ├── raster_loader.py                       # 真实 GeoTIFF 多波段读取与空间参考自动对齐
 │   ├── rotation_tracker.py                    # 20~30年长时序作物轮作转移矩阵、粮豆补贴与撂荒监测
@@ -87,12 +94,13 @@ crop_area_pipeline/
 └── output/                                    # 成果输出目录（自动生成）
     ├── .gitkeep                               # 保证版本库空目录结构完整
     ├── national_wheat_executive_briefing.html # 📑 官方高管决策分析专报 (出版级单文件 HTML，支持一键打印/PDF)
-    ├── vectorized_parcels_map.html            # 🌐 数字农情驾驶舱 (Leaflet WebGIS，Top10直达/三底图/搜索/导出)
+    ├── vectorized_parcels_map.html            # 🌐 数字农情驾驶舱 (Leaflet WebGIS，Top10直达/按省筛选/三底图/搜索/导出)
     ├── vectorized_parcels.geojson             # 🗺️ 标准 OGC WGS84 平滑地块矢量边界多边形图层
     ├── vectorized_parcels_attribute_table.csv # 📋 每一个地块的属性台账 (省份、农区、面积亩数、适机性评级)
     ├── vectorized_parcels_province_summary.csv# 📊 全国各省冬小麦种植面积与集中度汇总台账
     ├── acreage_statistics_report.csv          # 📊 官方无偏种植面积统计台账 (含解析标准误 SE、CV% 与 95% 置信区间)
     ├── area_weighted_confusion_matrix.csv     # 📐 联合国手册 Table 2 规范面积加权混淆矩阵 (含 UA/PA/OA 及标准差)
+    ├── sample_allocation_plan.csv             # 📋 联合国手册规范 Neyman 最优分层样方抽样设计清单 (可选)
     ├── crop_classification_map.tif            # 空间分类空间掩膜栅格 (可拖入 QGIS/ArcGIS)
     ├── crop_classification_map.png            # 遥感作物空间分类专题图
     ├── parcel_delineation_boundaries.png      # 零碎农田边界勾勒切分图
@@ -129,8 +137,13 @@ python demo_quickstart.py
 # 1. 标准生产模式
 python main.py --config config.yaml
 
-# 2. 推荐：开启 20~30 年长时序作物轮作演变与粮豆补贴/撂荒合规分析
-python main.py --config config.yaml --track-rotation
+# 2. 完整联动：轮作演变 + 联合国 Neyman 最优样方抽样设计
+python main.py --config config.yaml --track-rotation --sample-plan
+
+# 3. 系统自检与全量自动化测试套件
+python run_tests.py
+# 或通过主入口自检：
+python main.py --self-check
 ```
 
 ---

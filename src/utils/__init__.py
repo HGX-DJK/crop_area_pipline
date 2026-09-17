@@ -51,6 +51,13 @@ from src.utils.unit_utils import (
     WAN_MU,
 )
 
+# 6. 工程日志与配置校验
+from src.utils.logger import (
+    get_logger,
+    log_success,
+    validate_config,
+)
+
 __all__ = [
     # Geo
     "utm_to_wgs84",
@@ -85,4 +92,8 @@ __all__ = [
     "SQM_PER_MU",
     "MU_PER_HA",
     "WAN_MU",
+    # Logger & Validation
+    "get_logger",
+    "log_success",
+    "validate_config",
 ]

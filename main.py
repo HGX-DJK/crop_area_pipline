@@ -27,16 +27,23 @@ from src.visualizer import Visualizer
 from src.raster_loader import RasterLoader
 from src.rotation_tracker import CropRotationTracker
 from src.report_generator import ExecutiveReportGenerator
+from src.utils.logger import validate_config, get_logger
 
 
 def load_config(config_path="config.yaml"):
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"未找到配置文件: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    is_valid, errors = validate_config(cfg)
+    if not is_valid:
+        print("⚠️ 配置文件自校验提示:")
+        for err in errors:
+            print(f"   • {err}")
+    return cfg
 
 
-def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False):
+def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False):
     print("=" * 76)
     print("🌾 联合国农业统计遥感手册标准：农作物种植区域提取与零碎地块矢量化系统")
     print("=" * 76)
@@ -130,6 +137,21 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     df_cm.to_csv(cm_csv, encoding="utf-8-sig")
     print(f"  -> 已导出联合国 Olofsson (2014) 面积加权混淆矩阵与三维精度表: {cm_csv}")
 
+    # 可选：联合国手册事前样方抽样方案设计 (Neyman Optimal Allocation)
+    if sample_plan:
+        print("\n" + "-" * 76)
+        print("📋 [联合国手册事前抽样设计] 基于 Neyman 最佳分层抽样算法输出实地调查方案...")
+        df_sample_plan = area_estimator.design_optimal_sample_allocation(
+            total_sample_budget=150,
+            crop_classified_mask=crop_mask,
+            min_sample_per_class=20
+        )
+        plan_csv = os.path.join(output_dir, "sample_allocation_plan.csv")
+        area_estimator.export_sampling_plan(df_sample_plan, output_csv=plan_csv)
+        print(f"  -> 目标总预算 150 个样方，已导出《国家样方抽样设计清单》至: {plan_csv}")
+        for _, r in df_sample_plan.iterrows():
+            print(f"     * {r['crop_name']:<8}: 分配 {r['recommended_sample_n']:>3} 个样框 ({r['sample_ratio_pct']:>4.1f}%) | 面积占比: {r['stratum_weight_Wh']*100:>4.1f}%")
+
     # 7. 可选长时序（20~30年）农田轮作演变与撂荒/补贴合规监测
     do_rotation = track_rotation or config.get("rotation_tracking", {}).get("enabled", False)
     comp_csv = None
@@ -208,12 +230,20 @@ if __name__ == "__main__":
     parser.add_argument("--geotiff-dir", default=None, help="多时相 GeoTIFF 影像目录 (覆盖 config.yaml)")
     parser.add_argument("--output-dir", default=None, help="成果输出目录 (覆盖 config.yaml)")
     parser.add_argument("--track-rotation", action="store_true", help="是否同时执行长时序作物轮作演变、撂荒与粮豆补贴合规分析")
+    parser.add_argument("--sample-plan", action="store_true", help="是否执行联合国手册 Neyman 最优分层样方抽样设计并导出规划清单")
+    parser.add_argument("--self-check", action="store_true", help="一键执行全系统自动化测试与健康自检")
     args = parser.parse_args()
+
+    if args.self_check:
+        import run_tests
+        run_tests.main()
+        sys.exit(0)
 
     run_pipeline(
         config_path=args.config,
         override_mode=args.mode,
         override_geotiff_dir=args.geotiff_dir,
         override_output_dir=args.output_dir,
-        track_rotation=args.track_rotation
+        track_rotation=args.track_rotation,
+        sample_plan=args.sample_plan
     )

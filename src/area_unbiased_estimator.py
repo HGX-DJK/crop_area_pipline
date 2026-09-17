@@ -363,3 +363,102 @@ class AreaUnbiasedEstimator:
             "ci_95_ppi": [round(theta_ptd - 1.96 * se_ptd, 3), round(theta_ptd + 1.96 * se_ptd, 3)],
             "efficiency_gain_factor": efficiency_gain
         }
+
+    def design_optimal_sample_allocation(
+        self,
+        total_sample_budget: int = 150,
+        crop_classified_mask: np.ndarray = None,
+        min_sample_per_class: int = 20,
+        prior_accuracies: dict = None
+    ) -> pd.DataFrame:
+        """
+        联合国手册第 24 章规范：基于 Neyman 最佳分层抽样设计（Neyman Optimal Allocation）。
+        在给定的实地调查总预算样方数（如 150 个样框）下，自动求解使全域作物面积无偏估计量方差最小的最优样本分配方案。
+
+        数学公式:
+            n_h = n * (W_h * sigma_h) / sum(W_k * sigma_k)
+            其中:
+            - W_h: 分类制图层中各作物的面积比例权重 (A_h / A_total)
+            - sigma_h: 各层先验标准差 (依据二项分布 sigma_h = sqrt(UA_h * (1 - UA_h)) 或保守经验值)
+            - min_sample_per_class: 每类作物最低保底样方数 (Olofsson 2014 推荐 >= 20~30，确保方差可估)
+
+        返回:
+            pd.DataFrame: 包含比例分配、Neyman 最佳分配与最终工程推荐分配方案的决策台账
+        """
+        crop_codes = sorted(list(self.crop_legend.keys()))
+        crop_names = [self.crop_legend[c] for c in crop_codes]
+        K = len(crop_codes)
+
+        # 1. 计算分层面积权重 W_h
+        if crop_classified_mask is not None:
+            unique_classes, pixel_counts = np.unique(crop_classified_mask, return_counts=True)
+            total_pixels = float(crop_classified_mask.size)
+            wh_map = {c: 0.0 for c in crop_codes}
+            for c, cnt in zip(unique_classes, pixel_counts):
+                if c in wh_map:
+                    wh_map[c] = cnt / total_pixels
+            weights = np.array([wh_map[c] for c in crop_codes], dtype=np.float64)
+            # 面积 (亩)
+            areas_mu = np.array([wh_map[c] * total_pixels * self.pixel_area_m2 * MU_PER_SQM for c in crop_codes])
+        else:
+            # 默认宏观中原/华北粮仓典型比例
+            weights = np.array([0.45, 0.25, 0.20, 0.10][:K], dtype=np.float64)
+            weights = weights / np.sum(weights)
+            areas_mu = weights * 1000000.0
+
+        # 2. 先验标准差 sigma_h 计算
+        prior_ua = prior_accuracies or {
+            0: 0.92,  # 背景/非农田精度
+            1: 0.88,  # 玉米
+            2: 0.94,  # 小麦 (冬小麦物候鲜明，精度通常最高)
+            3: 0.85   # 大豆
+        }
+        sigmas = []
+        for c in crop_codes:
+            ua = prior_ua.get(c, 0.85)
+            # 二项抽样方差开方
+            sig = np.sqrt(max(0.01, ua * (1.0 - ua)))
+            sigmas.append(sig)
+        sigmas = np.array(sigmas, dtype=np.float64)
+
+        # 3. 传统比例抽样分配 (Proportional Allocation)
+        n_prop = np.round(total_sample_budget * weights).astype(int)
+
+        # 4. 联合国 Neyman 最佳抽样分配 (Neyman Allocation)
+        w_sig = weights * sigmas
+        sum_w_sig = np.sum(w_sig)
+        neyman_raw = total_sample_budget * (w_sig / max(sum_w_sig, 1e-12))
+        n_neyman = np.round(neyman_raw).astype(int)
+
+        # 5. 加入最低保底约束的最终推荐样方分配 (Constrained Optimal Allocation)
+        # 稀缺农作物（如大豆、花生）若纯按面积比例分配可能会样本过少导致方差膨胀，强制保底
+        n_recommended = np.maximum(n_neyman, min_sample_per_class)
+        # 调整多余/不足样本至总预算
+        diff = total_sample_budget - int(np.sum(n_recommended))
+        if diff != 0:
+            # 在面积最大的优势层调整差额
+            dom_idx = int(np.argmax(weights))
+            n_recommended[dom_idx] = max(min_sample_per_class, n_recommended[dom_idx] + diff)
+
+        records = []
+        for i, c in enumerate(crop_codes):
+            records.append({
+                "crop_code": c,
+                "crop_name": crop_names[i],
+                "map_area_mu": round(areas_mu[i], 1),
+                "stratum_weight_Wh": round(weights[i], 4),
+                "prior_sigma_h": round(sigmas[i], 3),
+                "proportional_n": int(n_prop[i]),
+                "neyman_optimal_n": int(n_neyman[i]),
+                "recommended_sample_n": int(n_recommended[i]),
+                "sample_ratio_pct": round((n_recommended[i] / total_sample_budget) * 100.0, 1)
+            })
+
+        df_plan = pd.DataFrame(records)
+        return df_plan
+
+    def export_sampling_plan(self, df_plan: pd.DataFrame, output_csv="output/sample_allocation_plan.csv") -> str:
+        """导出联合国手册规范的样方抽样设计方案台账。"""
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df_plan.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        return output_csv
