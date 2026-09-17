@@ -43,52 +43,51 @@ def load_config(config_path="config.yaml"):
     return cfg
 
 
-def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False):
+def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False, streaming=False, n_jobs=None):
     logger = get_logger("流水线", quiet=quiet)
     print("=" * 76)
     print("🌾 联合国农业统计遥感手册标准：农作物种植区域提取与零碎地块矢量化系统")
     print("=" * 76)
 
-    # 1. 加载参数配置并应用命令行覆盖
+    # 1. 加载并自检业务与算法配置
     config = load_config(config_path)
-    if override_output_dir:
-        config.setdefault("paths", {})["output_dir"] = override_output_dir
-    output_dir = config.get("paths", {}).get("output_dir", "output")
-    os.makedirs(output_dir, exist_ok=True)
-
     if override_mode:
         config.setdefault("input_source", {})["mode"] = override_mode
     if override_geotiff_dir:
         config.setdefault("input_source", {})["geotiff_dir"] = override_geotiff_dir
+    if override_output_dir:
+        config.setdefault("paths", {})["output_dir"] = override_output_dir
+    if n_jobs is not None:
+        config.setdefault("performance", {})["vectorization_n_jobs"] = n_jobs
+    if streaming:
+        config.setdefault("performance", {})["enable_window_streaming"] = True
 
-    spatial_res = config.get("spatial", {}).get("resolution_meters", 10.0)
-    logger.info(f"加载配置成功，空间分辨率: {spatial_res} 米，投影坐标系: {config.get('spatial', {}).get('crs', 'EPSG:32650')}")
+    output_dir = config.get("paths", {}).get("output_dir", "output")
+    os.makedirs(output_dir, exist_ok=True)
 
-    # 2. 构建多时相卫星时序立方体与物候特征工程
+    # 2. 初始化特征工程构建器并加载遥感数据
     ts_builder = TimeSeriesBuilder(config)
-    input_mode = config.get("input_source", {}).get("mode", "synthetic").lower()
+    input_mode = config.get("input_source", {}).get("mode", "synthetic")
     geo_info = None
+    doy_list = None
 
     if input_mode == "geotiff":
-        tif_dir = config.get("input_source", {}).get("geotiff_dir", "data/satellite_tifs")
-        logger.info(f"[步骤 1/5] 正在从真实 GeoTIFF 目录加载遥感影像时序: {tif_dir}")
+        geotiff_dir = config.get("input_source", {}).get("geotiff_dir", "data/satellite_tifs")
+        logger.info(f"[步骤 1/5] 读取本地多时相真实遥感 GeoTIFF 影像切片 ({geotiff_dir})...")
         loader = RasterLoader(config)
-        raster_cube, geo_info, doy_list = loader.load_multitemporal_tifs(tif_dir)
-        if geo_info and "resolution_meters" in geo_info:
-            spatial_res = geo_info["resolution_meters"]
+        raster_cube, geo_info, doy_list = loader.load_multitemporal_tifs(geotiff_dir)
+
+        if geo_info is not None:
+            spatial_res = geo_info.get("resolution_meters", 10.0)
             config.setdefault("spatial", {})["resolution_meters"] = spatial_res
             if "crs" in geo_info:
                 config.setdefault("spatial", {})["crs"] = geo_info["crs"]
             logger.info(f"  -> 自动对齐影像地面物理分辨率: {spatial_res:.2f} 米/像元。")
-        feature_cube = ts_builder.extract_phenological_features(raster_cube)
-        logger.info(f"  -> 已基于真实影像构建特征立方体，尺寸: {raster_cube.shape[0]} × {raster_cube.shape[1]}，时相数: {raster_cube.shape[2]}。")
     else:
         logger.info("[步骤 1/5] 构建多时相卫星时序立方体与提取作物物候指纹 (基准仿真模式)...")
         # 生成/加载标准测试场景 (120x120 像素，包含零碎农田、1~2像素窄田埂与背景地物)
         landscape = ts_builder.generate_synthetic_agricultural_landscape(rows=120, cols=120)
         raster_cube = landscape["raster_cube"]  # (Rows, Cols, 8个时相)
-        feature_cube = ts_builder.extract_phenological_features(raster_cube)
-        logger.info(f"  -> 已构建多时相特征立方体，像元规模: {landscape['rows']} × {landscape['cols']}，单像元物候特征数: {feature_cube.shape[2]}。")
 
     # 3. 训练作物分类器并全域推断
     logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
@@ -101,8 +100,18 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         doy_list=doy_list if input_mode == "geotiff" else ts_builder.doy_list
     )
 
-    crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
-    logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
+    perf_cfg = config.get("performance", {})
+    block_size = perf_cfg.get("streaming_block_size", 1024)
+    force_streaming = perf_cfg.get("enable_window_streaming", False)
+    total_pixels = raster_cube.shape[0] * raster_cube.shape[1]
+
+    if force_streaming or total_pixels > 4000000:
+        logger.info(f"  -> 启用滑动窗口流式推断 (块大小: {block_size}×{block_size})，避免大图内存峰值...")
+        crop_mask, conf_map = classifier.predict_cube_stream(raster_cube, ts_builder, block_size=block_size)
+    else:
+        feature_cube = ts_builder.extract_phenological_features(raster_cube)
+        crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
+        logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
     logger.info("[步骤 3/5] 执行形态学边缘腐蚀与狭窄田埂切分（切分零碎小田块）...")
@@ -226,6 +235,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default=None, help="成果输出目录 (覆盖 config.yaml)")
     parser.add_argument("--track-rotation", action="store_true", help="是否同时执行长时序作物轮作演变、撂荒与粮豆补贴合规分析")
     parser.add_argument("--sample-plan", action="store_true", help="是否执行联合国手册 Neyman 最优分层样方抽样设计并导出规划清单")
+    parser.add_argument("--streaming", action="store_true", help="强制启用滑动窗口分块流式处理以极致节省内存")
+    parser.add_argument("--n-jobs", type=int, default=None, help="多核多进程并行核心数 (默认: 读取配置文件或自动全核)")
     parser.add_argument("--self-check", action="store_true", help="一键执行全系统自动化测试与健康自检")
     parser.add_argument("--quiet", action="store_true", help="开启静默模式，仅输出最终统计台账与严重错误")
     args = parser.parse_args()
@@ -242,5 +253,7 @@ if __name__ == "__main__":
         override_output_dir=args.output_dir,
         track_rotation=args.track_rotation,
         sample_plan=args.sample_plan,
-        quiet=args.quiet
+        quiet=args.quiet,
+        streaming=args.streaming,
+        n_jobs=args.n_jobs
     )

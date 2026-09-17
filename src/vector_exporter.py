@@ -52,6 +52,158 @@ from src.utils.logger import get_logger, log_success
 from src.webgis_builder import WebGISDashboardBuilder
 
 
+# ============================================================================
+# 模块级无状态纯函数（支持在 ProcessPoolExecutor 中多核并行序列化执行）
+# ============================================================================
+
+def _pixel_to_coords_static(row: float, col: float, geo_transform: Optional[Tuple[float, ...]], origin_x: float, origin_y: float, resolution: float) -> Tuple[float, float]:
+    """像元行列号转换为地理空间坐标 (静态无状态版)"""
+    if geo_transform is not None:
+        t = geo_transform
+        geo_x = t[2] + col * t[0] + row * t[1]
+        geo_y = t[5] + col * t[3] + row * t[4]
+        return float(geo_x), float(geo_y)
+    geo_x = origin_x + col * resolution
+    geo_y = origin_y - row * resolution
+    return float(geo_x), float(geo_y)
+
+
+def _utm_to_wgs84_coords_static(utm_x: float, utm_y: float, is_geo: bool, target_crs: str, default_zone: int) -> Tuple[float, float]:
+    """UTM 投影米制坐标转换为 WGS84 经纬度 (静态无状态版)"""
+    fx, fy = float(utm_x), float(utm_y)
+    if is_geo or (abs(fx) <= 180.0 and abs(fy) <= 90.0):
+        return round(fx, 7), round(fy, 7)
+    zone = default_zone
+    match = re.search(r"326(\d{2})", target_crs)
+    if match:
+        zone = int(match.group(1))
+    lon, lat = utm_to_wgs84(fx, fy, zone=zone, northern=True)
+    return round(float(lon), 7), round(float(lat), 7)
+
+
+def _worker_process_single_parcel(task: dict) -> Optional[dict]:
+    """
+    独立单地块拓扑跟踪、几何平滑与属性封装纯函数。
+    支持在 ProcessPoolExecutor 中全核并发执行。
+    """
+    meta = task["meta"]
+    sub_mask = task["sub_mask"]
+    offset_r = task["offset_r"]
+    offset_c = task["offset_c"]
+    geo_transform = task.get("geo_transform")
+    is_geo_input = task.get("is_geo_input", False)
+    target_crs = task.get("target_crs", "EPSG:32650")
+    utm_zone = task.get("utm_zone", 50)
+    origin_x = task.get("origin_x", 500000.0)
+    origin_y = task.get("origin_y", 4200000.0)
+    resolution = task.get("resolution", 10.0)
+    smooth_boundaries = task.get("smooth_boundaries", True)
+    crop_legend = task.get("crop_legend", {})
+    is_wgs84 = task.get("is_wgs84", True)
+
+    pts_grid = _trace_grid_boundary(sub_mask)
+    if len(pts_grid) < 4:
+        coords = np.argwhere(sub_mask)
+        if len(coords) == 0:
+            return None
+        min_r, min_c = np.min(coords, axis=0)
+        max_r, max_c = np.max(coords, axis=0)
+        pts_grid = [
+            (min_r, min_c), (min_r, max_c + 1),
+            (max_r + 1, max_c + 1), (max_r + 1, min_c),
+            (min_r, min_c)
+        ]
+
+    simplified = _simplify_polygon(pts_grid, tolerance=0.5)
+    if smooth_boundaries:
+        simplified = _chaikin_smooth(simplified, iterations=1)
+
+    utm_ring = []
+    wgs84_ring = []
+    for r, c in simplified:
+        global_r = r + offset_r
+        global_c = c + offset_c
+        gx, gy = _pixel_to_coords_static(global_r, global_c, geo_transform, origin_x, origin_y, resolution)
+        if is_geo_input or (abs(float(gx)) <= 180.0 and abs(float(gy)) <= 90.0):
+            lon = round(float(gx), 7)
+            lat = round(float(gy), 7)
+            zone = int((lon + 180) / 6) + 1 if (-180.0 <= lon <= 180.0) else utm_zone
+            ux, uy = wgs84_to_utm(lon, lat, zone=zone)
+        else:
+            ux = round(float(gx), 2)
+            uy = round(float(gy), 2)
+            lon, lat = _utm_to_wgs84_coords_static(ux, uy, is_geo_input, target_crs, utm_zone)
+
+        utm_ring.append([ux, uy])
+        wgs84_ring.append([lon, lat])
+
+    perimeter = 0.0
+    for i in range(len(utm_ring) - 1):
+        dx = utm_ring[i + 1][0] - utm_ring[i][0]
+        dy = utm_ring[i + 1][1] - utm_ring[i][1]
+        perimeter += np.sqrt(dx * dx + dy * dy)
+    perimeter_m = round(perimeter, 1)
+
+    # RFC 7946 右手定则（外环逆时针）
+    signed_area = 0.0
+    for i in range(len(wgs84_ring) - 1):
+        signed_area += (wgs84_ring[i][0] * wgs84_ring[i + 1][1] - wgs84_ring[i + 1][0] * wgs84_ring[i][1])
+    if signed_area < 0:
+        wgs84_ring = wgs84_ring[::-1]
+        utm_ring = utm_ring[::-1]
+
+    # 质心坐标
+    c_px, c_py = _pixel_to_coords_static(meta["centroid_row"], meta["centroid_col"], geo_transform, origin_x, origin_y, resolution)
+    if is_geo_input or (abs(float(c_px)) <= 180.0 and abs(float(c_py)) <= 90.0):
+        c_lon = round(float(c_px), 7)
+        c_lat = round(float(c_py), 7)
+        c_zone = int((c_lon + 180) / 6) + 1 if (-180.0 <= c_lon <= 180.0) else utm_zone
+        c_ux, c_uy = wgs84_to_utm(c_lon, c_lat, zone=c_zone)
+    else:
+        c_ux = round(float(c_px), 2)
+        c_uy = round(float(c_py), 2)
+        c_lon, c_lat = _utm_to_wgs84_coords_static(c_ux, c_uy, is_geo_input, target_crs, utm_zone)
+
+    crop_name = crop_legend.get(meta["crop_code"], f"未知作物_{meta['crop_code']}")
+    compactness = calculate_isoperimetric_quotient(meta["area_m2"], perimeter_m)
+    compactness = round(min(1.0, max(0.01, compactness)), 3) if perimeter_m > 0 else 0.0
+
+    machinery_suitability = evaluate_machinery_suitability(meta["area_mu"], compactness)
+    province_name, agri_zone = assign_province_and_zone(c_lon, c_lat)
+    tier_label = get_scale_tier(meta["area_mu"])
+
+    props = {
+        "parcel_id": meta["parcel_id"],
+        "crop_code": meta["crop_code"],
+        "crop_name": crop_name,
+        "province": province_name,
+        "agri_zone": agri_zone,
+        "area_tier": tier_label,
+        "area_mu": meta["area_mu"],
+        "area_ha": meta["area_ha"],
+        "area_m2": meta["area_m2"],
+        "perimeter_m": perimeter_m,
+        "compactness": compactness,
+        "machinery_suitability": machinery_suitability,
+        "dominant_purity": meta["dominant_purity"],
+        "mean_confidence": meta["mean_confidence"],
+        "center_lon": c_lon,
+        "center_lat": c_lat,
+        "center_utm_x": round(c_ux, 2),
+        "center_utm_y": round(c_uy, 2),
+    }
+
+    export_coordinates = [wgs84_ring] if is_wgs84 else [utm_ring]
+    return {
+        "type": "Feature",
+        "properties": props,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": export_coordinates
+        }
+    }
+
+
 class VectorExporter:
     """农田地块几何矢量化与空间属性导出器"""
 
@@ -71,6 +223,8 @@ class VectorExporter:
             2: "冬小麦",
             3: "大豆"
         })
+        perf = self.config.get("performance", {})
+        self.n_jobs = perf.get("vectorization_n_jobs", self.config.get("classification", {}).get("n_jobs", -1))
 
         # 初始化 pyproj Transformer（若可用）
         self._transformer = None
@@ -207,6 +361,7 @@ class VectorExporter:
         total_p = len(parcel_metadata)
         self.logger.info(f"开始执行 {total_p} 个主力核心地块的高精度轮廓跟踪与拓扑平滑...")
 
+        tasks = []
         for idx, meta in enumerate(parcel_metadata, 1):
             pid = meta["internal_id"]
             if pid <= len(slices) and slices[pid - 1] is not None:
@@ -222,71 +377,60 @@ class VectorExporter:
                 sub_mask = (parcel_id_mask == pid)
                 offset_r, offset_c = 0, 0
 
-            wgs84_ring, utm_ring, perimeter_m = self._extract_parcel_geometry(
-                sub_mask, geo_info, offset_r=offset_r, offset_c=offset_c
-            )
-            
-            # 计算地块质心坐标
-            c_px, c_py = self._pixel_to_coords(meta["centroid_row"], meta["centroid_col"], geo_info)
-            if is_geo_input or (abs(float(c_px)) <= 180.0 and abs(float(c_py)) <= 90.0):
-                c_lon = round(float(c_px), 7)
-                c_lat = round(float(c_py), 7)
-                c_zone = int((c_lon + 180) / 6) + 1 if (-180.0 <= c_lon <= 180.0) else self.utm_zone
-                c_ux, c_uy = wgs84_to_utm(c_lon, c_lat, zone=c_zone)
-            else:
-                c_ux = round(float(c_px), 2)
-                c_uy = round(float(c_py), 2)
-                c_lon, c_lat = self._utm_to_wgs84_coords(c_ux, c_uy, geo_info)
+            geo_transform = tuple(geo_info["transform"]) if (geo_info and "transform" in geo_info) else None
+            tasks.append({
+                "meta": meta,
+                "sub_mask": sub_mask,
+                "offset_r": offset_r,
+                "offset_c": offset_c,
+                "geo_transform": geo_transform,
+                "is_geo_input": is_geo_input,
+                "target_crs": str(geo_info.get("crs", self.crs)) if geo_info else str(self.crs),
+                "utm_zone": self.utm_zone,
+                "origin_x": self.origin_x,
+                "origin_y": self.origin_y,
+                "resolution": self.resolution,
+                "smooth_boundaries": self.config.get("segmentation", {}).get("smooth_boundaries", True),
+                "crop_legend": self.crop_legend,
+                "is_wgs84": is_wgs84,
+            })
 
-            crop_name = self.crop_legend.get(meta["crop_code"], f"未知作物_{meta['crop_code']}")
+        # 判断是否启用多核并行加速
+        features = []
+        use_parallel = (self.n_jobs != 1) and (total_p >= 20)
 
-            # 计算地块几何规整度与农机适机性评估 (基于联合国 FAO 农业工程与高标准农田建设标准)
-            compactness = calculate_isoperimetric_quotient(meta["area_m2"], perimeter_m)
-            compactness = round(min(1.0, max(0.01, compactness)), 3) if perimeter_m > 0 else 0.0
-
-            # 尺度自适应农机作业适机性评估 (基于 utils.agri_zoning)
-            machinery_suitability = evaluate_machinery_suitability(meta["area_mu"], compactness)
-
-            # 智能判定行政省份与农业优势区划
-            province_name, agri_zone = assign_province_and_zone(c_lon, c_lat)
-
-            # 产业片区规模等级 (基于 utils.agri_zoning)
-            tier_label = get_scale_tier(meta["area_mu"])
-
-            props = {
-                "parcel_id": meta["parcel_id"],
-                "crop_code": meta["crop_code"],
-                "crop_name": crop_name,
-                "province": province_name,
-                "agri_zone": agri_zone,
-                "area_tier": tier_label,
-                "area_mu": meta["area_mu"],
-                "area_ha": meta["area_ha"],
-                "area_m2": meta["area_m2"],
-                "perimeter_m": perimeter_m,
-                "compactness": compactness,
-                "machinery_suitability": machinery_suitability,
-                "dominant_purity": meta["dominant_purity"],
-                "mean_confidence": meta["mean_confidence"],
-                "center_lon": c_lon,
-                "center_lat": c_lat,
-                "center_utm_x": round(c_ux, 2),
-                "center_utm_y": round(c_uy, 2),
-            }
-
-            export_coordinates = [wgs84_ring] if is_wgs84 else [utm_ring]
-
-            feature = {
-                "type": "Feature",
-                "properties": props,
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": export_coordinates
-                }
-            }
-            features.append(feature)
-            if idx % 100 == 0 or idx == total_p:
-                self.logger.info(f"  -> 矢量化进度: {idx}/{total_p} 个地块边界已完成。")
+        if use_parallel:
+            max_workers = os.cpu_count() or 4
+            if self.n_jobs and self.n_jobs > 0:
+                max_workers = min(max_workers, self.n_jobs)
+            self.logger.info(f"已启动多核并行矢量化引擎 (Worker 核心数: {max_workers})，并发处理 {total_p} 个主力地块...")
+            try:
+                from concurrent.futures import ProcessPoolExecutor
+                chunk_sz = max(1, total_p // (max_workers * 4))
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    for feat in executor.map(_worker_process_single_parcel, tasks, chunksize=chunk_sz):
+                        if feat is not None:
+                            features.append(feat)
+            except Exception as e:
+                self.logger.warning(f"多进程环境受限 ({e})，平滑降级至线程池并发...")
+                try:
+                    from concurrent.futures import ThreadPoolExecutor
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        for feat in executor.map(_worker_process_single_parcel, tasks):
+                            if feat is not None:
+                                features.append(feat)
+                except Exception:
+                    for t in tasks:
+                        feat = _worker_process_single_parcel(t)
+                        if feat is not None:
+                            features.append(feat)
+        else:
+            for idx, t in enumerate(tasks, 1):
+                feat = _worker_process_single_parcel(t)
+                if feat is not None:
+                    features.append(feat)
+                if idx % 100 == 0 or idx == total_p:
+                    self.logger.info(f"  -> 矢量化进度: {idx}/{total_p} 个地块边界已完成。")
 
         # 构建规范 FeatureCollection
         crs_urn = "urn:ogc:def:crs:OGC:1.3:CRS84" if is_wgs84 else f"urn:ogc:def:crs:OGC:1.3:{self.crs}"

@@ -8,6 +8,7 @@
 import os
 import re
 import glob
+from typing import Dict, Any, Tuple, List, Optional
 import numpy as np
 
 from src.utils.geo_utils import (
@@ -31,18 +32,8 @@ class RasterLoader:
         self.logger = get_logger("栅格加载")
         self.spatial_cfg = self.config.get("spatial", {})
 
-    def load_multitemporal_tifs(self, tif_dir_or_list):
-        """
-        从指定目录中读取多时相 GeoTIFF 影像，并按日历日（DOY）自动排序堆叠。
-        
-        参数：
-            tif_dir_or_list: 包含多时相 .tif 文件的文件夹路径，或 .tif 文件路径列表。
-                            文件名通常包含日期或DOY，例如：'20240415_NDVI.tif' 或 'doy_110.tif'。
-        返回：
-            raster_cube: 形状为 (Rows, Cols, T) 的多时相矩阵
-            geo_info: 包含 crs, transform, bounds, resolution, width, height 的空间参考字典
-            doy_list: 对应的日历日列表
-        """
+    def resolve_tif_files(self, tif_dir_or_list):
+        """解析并返回有效的 GeoTIFF 文件路径列表。"""
         if isinstance(tif_dir_or_list, str):
             if os.path.isdir(tif_dir_or_list):
                 tif_files = sorted(
@@ -56,66 +47,139 @@ class RasterLoader:
 
         if not tif_files:
             raise FileNotFoundError(f"未在指定路径检索到任何 GeoTIFF (.tif) 影像文件: {tif_dir_or_list}")
+        return tif_files
 
+    def get_multitemporal_metadata(self, tif_dir_or_list):
+        """
+        轻量解析多时相 GeoTIFF 的时相元数据与空间参考，无需载入任何像元矩阵。
+        返回: (sorted_tif_files, geo_info, sorted_doy_list, is_multiband)
+        """
         if not HAS_RASTERIO:
             self.logger.warning("未检测到 rasterio 地理空间库。如需直接解析真实 GeoTIFF 的坐标与投影，请执行: pip install rasterio")
             raise ImportError("缺少 rasterio 库，无法解析带有地理坐标的真实 GeoTIFF 影像。")
 
-        self.logger.info(f"检索到 {len(tif_files)} 景多时相遥感影像，正在解析时相与空间信息...")
-
-        band_arrays = []
-        doy_list = []
+        tif_files = self.resolve_tif_files(tif_dir_or_list)
         geo_info = {}
+        doy_list = []
+        is_multiband = False
 
+        # 检验第一景获取核心地理空间元数据
+        with rasterio.open(tif_files[0]) as src:
+            is_geo = src.crs.is_geographic if src.crs else is_geographic_system(self.spatial_cfg.get("crs", ""))
+            res_x = abs(src.transform[0])
+            res_y = abs(src.transform[4])
+            res_meters = estimate_resolution_meters(res_x, is_geographic=is_geo)
+
+            geo_info = {
+                "crs": str(src.crs) if src.crs else self.spatial_cfg.get("crs", "EPSG:32650"),
+                "transform": src.transform,
+                "bounds": src.bounds,
+                "width": src.width,
+                "height": src.height,
+                "resolution_x": res_x,
+                "resolution_y": res_y,
+                "resolution_meters": res_meters,
+                "is_geographic": is_geo,
+                "nodata": src.nodata,
+                "count": src.count
+            }
+
+            if len(tif_files) == 1 and src.count > 1:
+                is_multiband = True
+                doy_list = [b * 30 for b in range(1, src.count + 1)]
+                return tif_files, geo_info, doy_list, is_multiband
+
+        # 多景文件解析各自时相 DOY
         for idx, tif_path in enumerate(tif_files):
             fname = os.path.basename(tif_path)
-            
-            # 解析日期或 DOY (基于 utils.geo_utils)
             doy = parse_temporal_doy(fname, default_doy=(idx + 1) * 30)
+            doy_list.append(doy)
 
-            with rasterio.open(tif_path) as src:
-                # 记录第一景影像的地理空间元数据
-                if idx == 0:
-                    is_geo = src.crs.is_geographic if src.crs else is_geographic_system(self.spatial_cfg.get("crs", ""))
-                    res_x = abs(src.transform[0])
-                    res_y = abs(src.transform[4])
-                    # 若为地理坐标系(度)，估算赤道/中纬度每度对应米数 (1度 ≈ 111320米)
-                    res_meters = estimate_resolution_meters(res_x, is_geographic=is_geo)
+        sorted_order = np.argsort(doy_list)
+        sorted_tif_files = [tif_files[i] for i in sorted_order]
+        sorted_doy_list = [doy_list[i] for i in sorted_order]
 
-                    geo_info = {
-                        "crs": str(src.crs) if src.crs else self.spatial_cfg.get("crs", "EPSG:32650"),
-                        "transform": src.transform,
-                        "bounds": src.bounds,
-                        "width": src.width,
-                        "height": src.height,
-                        "resolution_x": res_x,
-                        "resolution_y": res_y,
-                        "resolution_meters": res_meters,
-                        "is_geographic": is_geo,
-                        "nodata": src.nodata
-                    }
+        return sorted_tif_files, geo_info, sorted_doy_list, is_multiband
 
-                # 检查是否为单景多波段时序立方体
-                if len(tif_files) == 1 and src.count > 1:
-                    self.logger.info(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")
-                    for b in range(1, src.count + 1):
-                        arr = src.read(b).astype(np.float32)
-                        if src.nodata is not None:
-                            arr[arr == src.nodata] = np.nan
-                        band_arrays.append(arr)
-                        doy_list.append((b) * 30)
-                    break
-                else:
+    def iter_raster_windows(self, tif_dir_or_list, block_size: int = 1024, is_multiband: Optional[bool] = None):
+        """
+        分块滑动窗口生成器 (Tiling Window Generator)。
+        按需流式读取指定窗口的像元时序切片，彻底避免 GB 级影像导致内存崩溃。
+        
+        生成器依次产出: ((r_start, r_stop), (c_start, c_stop), window_cube)
+        """
+        from rasterio.windows import Window
+
+        if isinstance(tif_dir_or_list, list) and len(tif_dir_or_list) > 0 and not isinstance(tif_dir_or_list[0], str):
+            # 兼容已排序文件列表
+            sorted_files = tif_dir_or_list
+            geo_info = self.spatial_cfg
+            h = geo_info.get("height", 1024)
+            w = geo_info.get("width", 1024)
+        else:
+            sorted_files, geo_info, _, auto_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+            if is_multiband is None:
+                is_multiband = auto_multiband
+            h, w = geo_info["height"], geo_info["width"]
+
+        # 打开所有文件句柄（仅保留指针，不读取像元）
+        src_handles = [rasterio.open(f) for f in sorted_files]
+        try:
+            for r in range(0, h, block_size):
+                bh = min(block_size, h - r)
+                for c in range(0, w, block_size):
+                    bw = min(block_size, w - c)
+                    win = Window(col_off=c, row_off=r, width=bw, height=bh)
+
+                    band_slices = []
+                    if is_multiband and len(src_handles) == 1:
+                        src = src_handles[0]
+                        for b in range(1, src.count + 1):
+                            arr = src.read(b, window=win).astype(np.float32)
+                            if src.nodata is not None:
+                                arr[arr == src.nodata] = np.nan
+                            band_slices.append(arr)
+                    else:
+                        for src in src_handles:
+                            arr = src.read(1, window=win).astype(np.float32)
+                            if src.nodata is not None:
+                                arr[arr == src.nodata] = np.nan
+                            band_slices.append(arr)
+
+                    win_cube = np.stack(band_slices, axis=-1)
+                    yield (slice(r, r + bh), slice(c, c + bw)), win_cube
+        finally:
+            for s in src_handles:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    def load_multitemporal_tifs(self, tif_dir_or_list):
+        """
+        从指定目录中读取多时相 GeoTIFF 影像，并按日历日（DOY）自动排序堆叠。
+        对于中小型影像直接返回全图三维矩阵；对于大图推荐配合 iter_raster_windows 流式处理。
+        """
+        sorted_files, geo_info, doy_list, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+
+        self.logger.info(f"检索到 {len(sorted_files)} 景多时相遥感影像，正在解析时相与空间信息...")
+
+        band_arrays = []
+        if is_multiband and len(sorted_files) == 1:
+            with rasterio.open(sorted_files[0]) as src:
+                self.logger.info(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")
+                for b in range(1, src.count + 1):
+                    arr = src.read(b).astype(np.float32)
+                    if src.nodata is not None:
+                        arr[arr == src.nodata] = np.nan
+                    band_arrays.append(arr)
+        else:
+            for tif_path in sorted_files:
+                with rasterio.open(tif_path) as src:
                     arr = src.read(1).astype(np.float32)
                     if src.nodata is not None:
                         arr[arr == src.nodata] = np.nan
                     band_arrays.append(arr)
-                    doy_list.append(doy)
-
-        # 按 DOY 排序各时相
-        sorted_order = np.argsort(doy_list)
-        band_arrays = [band_arrays[i] for i in sorted_order]
-        doy_list = [doy_list[i] for i in sorted_order]
 
         # 堆叠为三维立方体 (Rows, Cols, T)
         raster_cube = np.stack(band_arrays, axis=-1)

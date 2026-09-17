@@ -138,4 +138,11 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if not isinstance(n_boot, int) or n_boot < 50:
         errors.append(f"unbiased_area_inference.n_bootstrap 抽样次数过少 ({n_boot})，建议不少于 50 次。")
 
+    # 6. 性能配置校验
+    perf = config.get("performance", {})
+    if perf:
+        blk_sz = perf.get("streaming_block_size", 1024)
+        if not isinstance(blk_sz, int) or blk_sz < 16:
+            errors.append(f"performance.streaming_block_size 分块尺寸 ({blk_sz}) 必须为大于等于 16 的整数。")
+
     return len(errors) == 0, errors

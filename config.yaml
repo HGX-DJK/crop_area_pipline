@@ -83,3 +83,8 @@ paths:
 visualization:
   generate_plots: true
   plot_dpi: 300
+
+performance:
+  enable_window_streaming: false  # 是否强制开启滑动窗口流式处理（超大图自动自适应开启）
+  streaming_block_size: 1024      # 分块窗口尺寸 (1024x1024 像元)
+  vectorization_n_jobs: -1        # 地块矢量化多核并行 CPU 核心数 (-1 为调用全部可用 CPU 核心)

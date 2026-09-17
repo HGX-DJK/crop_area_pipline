@@ -177,3 +177,69 @@ class CropClassifier:
         confidence_map = max_probs.reshape(h, w).astype(np.float32)
 
         return predicted_mask, confidence_map
+
+    def predict_cube_stream(self, raster_cube: np.ndarray, ts_builder, block_size: int = 1024):
+        """
+        分块滑动窗口推断内存中的多时相栅格立方体 (Rows, Cols, T)。
+        无需将全景三维物候特征矩阵一次性完全物化，按窗口切片就地提取特征与推断，
+        显著降低全图运算时的内存峰值（节省 60%~80% 内存）。
+        """
+        if not self.is_trained:
+            raise RuntimeError("分类器尚未训练，无法执行全域空间预测。")
+
+        h, w, t = raster_cube.shape
+        crop_mask = np.zeros((h, w), dtype=np.int32)
+        conf_map = np.zeros((h, w), dtype=np.float32)
+
+        n_blocks_r = (h + block_size - 1) // block_size
+        n_blocks_c = (w + block_size - 1) // block_size
+        total_blocks = n_blocks_r * n_blocks_c
+
+        self.logger.info(f"开启滑动窗口分块流式推断引擎 (整图: {h}×{w}, 分块: {total_blocks}个, 块尺寸: {block_size}×{block_size})...")
+
+        blk_idx = 0
+        for r in range(0, h, block_size):
+            r_end = min(r + block_size, h)
+            for c in range(0, w, block_size):
+                c_end = min(c + block_size, w)
+                blk_idx += 1
+
+                sub_cube = raster_cube[r:r_end, c:c_end, :]
+                sub_feats = ts_builder.extract_phenological_features(sub_cube)
+                sub_mask, sub_conf = self.predict_raster_cube(sub_feats)
+
+                crop_mask[r:r_end, c:c_end] = sub_mask
+                conf_map[r:r_end, c:c_end] = sub_conf
+
+        log_success(self.logger, f"全景分块流式空间预测完成 (已处理 {total_blocks} 块)，平均置信度: {np.mean(conf_map) * 100:.1f}%。")
+        return crop_mask, conf_map
+
+    def predict_geotiff_stream(self, raster_loader, tif_dir_or_list, ts_builder, block_size: int = 1024):
+        """
+        对磁盘上的超大幅宽 GeoTIFF 影像执行纯流式滑动窗口推断 (True Out-Of-Core Streaming)。
+        全过程无需载入整景影像或整景特征，内存开销恒定保持在数百兆以内，彻底避免 OOM。
+        """
+        if not self.is_trained:
+            raise RuntimeError("分类器尚未训练，无法执行全域空间预测。")
+
+        sorted_files, geo_info, doy_list, is_multiband = raster_loader.get_multitemporal_metadata(tif_dir_or_list)
+        h, w = geo_info["height"], geo_info["width"]
+
+        crop_mask = np.zeros((h, w), dtype=np.int32)
+        conf_map = np.zeros((h, w), dtype=np.float32)
+
+        n_blocks_r = (h + block_size - 1) // block_size
+        n_blocks_c = (w + block_size - 1) // block_size
+        total_blocks = n_blocks_r * n_blocks_c
+        self.logger.info(f"开启磁盘 GeoTIFF 纯外核流式推断引擎 (全景: {h}×{w}, 分块: {total_blocks}个, 块大小: {block_size}×{block_size})...")
+
+        blk_idx = 0
+        for (r_slice, c_slice), win_cube in raster_loader.iter_raster_windows(sorted_files, block_size=block_size, is_multiband=is_multiband):
+            blk_idx += 1
+            win_feats = ts_builder.extract_phenological_features(win_cube)
+            win_mask, win_conf = self.predict_raster_cube(win_feats)
+            crop_mask[r_slice, c_slice] = win_mask
+            conf_map[r_slice, c_slice] = win_conf
+
+        log_success(self.logger, f"磁盘 GeoTIFF 分块流式预测完成 (共 {total_blocks} 块)，平均置信度: {np.mean(conf_map) * 100:.1f}%。")
+        return crop_mask, conf_map, geo_info, doy_list

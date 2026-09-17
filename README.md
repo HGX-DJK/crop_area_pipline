@@ -73,7 +73,8 @@ crop_area_pipeline/
 │   ├── test_geo_utils.py                      # WGS84与UTM坐标正反算严密性测试 (< 0.1 mm)
 │   ├── test_geometry_utils.py                 # 地块轮廓追踪、RDP与Chaikin平滑测试
 │   ├── test_unbiased_estimator.py             # Olofsson (2014) 无偏推断与 Neyman 最佳抽样分配测试
-│   └── test_pipeline_e2e.py                   # 端到端流水线快速集成回归测试
+│   ├── test_pipeline_e2e.py                   # 端到端流水线快速集成回归测试
+│   └── test_performance_scaling.py           # 🚀 工业级性能加速与流式推断专项测试套件
 ├── data/                                      # 数据目录（内置真实/模拟基准测试集）
 │   ├── sample_phenology_curves.csv            # 典型作物多时相物候基准曲线库
 │   ├── sample_training_points.csv             # 训练样本点（多时相特征与标签）
@@ -137,10 +138,13 @@ python demo_quickstart.py
 # 1. 标准生产模式
 python main.py --config config.yaml
 
-# 2. 完整联动：轮作演变 + 联合国 Neyman 最优样方抽样设计
+# 2. 工业级高性能模式：超大图滑动窗口流式处理 + 多核并行矢量化 (调用全部 CPU 核心)
+python main.py --config config.yaml --streaming --n-jobs -1
+
+# 3. 完整联动：轮作演变 + 联合国 Neyman 最优样方抽样设计
 python main.py --config config.yaml --track-rotation --sample-plan
 
-# 3. 系统自检与全量自动化测试套件
+# 4. 系统自检与全量自动化测试套件 (含性能扩展性专项验证)
 python run_tests.py
 # 或通过主入口自检：
 python main.py --self-check

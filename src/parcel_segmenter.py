@@ -45,14 +45,17 @@ class ParcelSegmenter:
         # 1. 生成农田二值掩膜 (只要是农作物即为 True)
         cropland_binary = (crop_classified_mask > 0).astype(np.uint8)
 
-        # 2. 依据联合国手册第 8 章：计算不同作物交界处的边界梯度
-        # 相邻不同作物或者作物与田埂之间，执行梯度检测防止误粘连
+        # 2. 依据联合国手册第 8 章：矢量化计算不同作物交界处的边界梯度（Zero-Copy Slicing）
+        # 相邻不同作物之间执行原地切片差分检测防止误粘连（免除 4 次 np.roll 内存复制与环绕伪影）
         gradient_edges = np.zeros((rows, cols), dtype=bool)
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            shifted = np.roll(np.roll(crop_classified_mask, dr, axis=0), dc, axis=1)
-            # 若当前像元与相邻像元类别不同且均不为背景，则标记为分界线
-            diff_crop = (crop_classified_mask > 0) & (shifted > 0) & (crop_classified_mask != shifted)
-            gradient_edges = gradient_edges | diff_crop
+        if rows > 1:
+            diff_v = (crop_classified_mask[:-1, :] > 0) & (crop_classified_mask[1:, :] > 0) & (crop_classified_mask[:-1, :] != crop_classified_mask[1:, :])
+            gradient_edges[:-1, :][diff_v] = True
+            gradient_edges[1:, :][diff_v] = True
+        if cols > 1:
+            diff_h = (crop_classified_mask[:, :-1] > 0) & (crop_classified_mask[:, 1:] > 0) & (crop_classified_mask[:, :-1] != crop_classified_mask[:, 1:])
+            gradient_edges[:, :-1][diff_h] = True
+            gradient_edges[:, 1:][diff_h] = True
 
         # 将不同作物交界处切开
         cropland_binary[gradient_edges] = 0
@@ -103,8 +106,12 @@ class ParcelSegmenter:
         total_candidate_m2 = float(np.sum(component_sizes)) * self.pixel_area_m2
         total_candidate_mu = sqm_to_mu(total_candidate_m2, 2)
 
-        # 按面积从大到小优选主力地块要素，确保秒级矢量化与 Web 地图极速加载
-        comp_indices = sorted(list(range(1, num_features + 1)), key=lambda cid: component_sizes[cid - 1], reverse=True)
+        # 利用底层 C 级 argsort 极速降序排序，按面积从大到小优选主力地块
+        if num_features > 0:
+            sorted_order = np.argsort(-component_sizes)
+            comp_indices = (sorted_order + 1).tolist()
+        else:
+            comp_indices = []
         if len(comp_indices) > self.max_export_parcels:
             selected_indices = comp_indices[:self.max_export_parcels]
             residual_indices = comp_indices[self.max_export_parcels:]
