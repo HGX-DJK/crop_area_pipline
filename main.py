@@ -130,14 +130,9 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     df_cm.to_csv(cm_csv, encoding="utf-8-sig")
     print(f"  -> 已导出联合国 Olofsson (2014) 面积加权混淆矩阵与三维精度表: {cm_csv}")
 
-    # 自动生成全国冬小麦遥感空间监测与决策分析专报 (出版级单文件 HTML)
-    report_gen = ExecutiveReportGenerator(config)
-    csv_parcels = geojson_out.replace(".geojson", "_attribute_table.csv")
-    briefing_html = os.path.join(output_dir, "national_wheat_executive_briefing.html")
-    report_gen.generate_report(report_csv, csv_parcels, briefing_html, confusion_matrix_csv=cm_csv)
-
     # 7. 可选长时序（20~30年）农田轮作演变与撂荒/补贴合规监测
     do_rotation = track_rotation or config.get("rotation_tracking", {}).get("enabled", False)
+    comp_csv = None
     if do_rotation:
         print("\n" + "-" * 76)
         print("🌱 [长时序监测拓展] 执行多年期作物轮作演变矩阵与撂荒/粮豆补贴合规分析...")
@@ -145,7 +140,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         # 生成前期参考期基准（若无外部历史数据则基于演化规律生成高保真基线）
         early_mask = rot_tracker.simulate_historical_transition(crop_mask, years_span=5)
         df_trans, df_comp = rot_tracker.analyze_transition(early_mask, crop_mask, year_early=2020, year_late=2024)
-        rot_tracker.export_rotation_report(df_trans, df_comp, output_dir=output_dir)
+        _, comp_csv = rot_tracker.export_rotation_report(df_trans, df_comp, output_dir=output_dir)
 
         print("\n📋 跨期作物轮作合规与业务预警清单:")
         for _, row in df_comp.iterrows():
@@ -164,7 +159,19 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         print(f"     * 零碎农田边界勾勒切分图: {os.path.basename(p3)}")
         print(f"     * 种植面积无偏校准对比图: {os.path.basename(p4)}")
 
-    # 9. 打印控制台官方统计汇总报表
+    # 9. 编译生成出版级综合图文决策分析专报 (单文件 HTML，内嵌成果画廊与轮作分析)
+    report_gen = ExecutiveReportGenerator(config)
+    csv_parcels = geojson_out.replace(".geojson", "_attribute_table.csv")
+    briefing_html = os.path.join(output_dir, "national_wheat_executive_briefing.html")
+    report_gen.generate_report(
+        report_csv,
+        csv_parcels,
+        briefing_html,
+        confusion_matrix_csv=cm_csv,
+        rotation_compliance_csv=comp_csv
+    )
+
+    # 10. 打印控制台官方统计汇总报表
     print("\n" + "=" * 102)
     print("📊 联合国统计司 / 粮农组织（FAO）农作物种植面积无偏统计与 Olofsson (2014) 官方精度台账")
     print("=" * 102)
