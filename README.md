@@ -43,12 +43,14 @@
 - **拓扑保形 Chaikin 平滑**：内置 Chaikin 拐角切割样条平滑算法，在保证拓扑严密闭合、首尾重合与面积守恒的前提下，消除栅格直角阶梯锯齿，输出自然流畅的农田有机边界；
 - **等周紧凑度与农机适机性评估**：计算地块等周紧凑度指数（$4\pi A / P^2$），自动评定农机作业适宜度（`优 (规整适机)` / `良 (基本适机)` / `中/碎 (建议并块平整)`），为高标准农田建设提供直接依据。
 
-### 3. 联合国两阶段耕地目标域无偏校准（手册统计篇第 24 章与第 26 章 Weighted Area / PPI）
+### 3. 联合国两阶段耕地目标域无偏校准与 Olofsson (2014) 官方精度评价（手册第 24、26 章）
 针对小农细碎地块田埂密集、边缘混合像元严重、传统“直接数像素面积”（Pixel Counting）会产生 15%~35% 系统性偏差的痛点：
 - **两阶段耕地目标域隔离（Cropland Domain Stratification）**：
   在宏观图景中将非农大背景（荒漠、高山、水体）进行分层隔离，彻底切断小样本背景混淆概率向全境数百亿亩大背景无限外推的数学漏洞；
-- **加权误差转移矩阵校准**：通过少量概率抽样样方建立条件转移概率矩阵 $P(\text{True}=j \mid \text{Map}=i)$；
-- **Percentile Bootstrap 重抽样（2,000次）**：输出具备法律合规与统计防御力的**无偏估计种植面积**与 **95% 置信区间**，冬小麦面积完全吻合国家统计局公布的全国常年播种红线（约 3.3 亿亩）。
+- **Olofsson et al. (2014) 面积加权混淆矩阵与解析标准误**：
+  依据联合国手册第 24 章规范构建面积比例矩阵 $\hat{p}_{ij} = W_i \frac{n_{ij}}{n_{i\cdot}}$，计算**解析标准误（Standard Error, SE）**与变异系数（CV%），严格输出用户精度（UA）、生产者精度（PA）与总体精度（OA）；
+- **Percentile Bootstrap 重抽样与 PPI 增强推断**：
+  结合 2,000 次 Bootstrap 经验分布交叉检验，并内置手册第 26 章 Predict-Then-Debias (PTD) 预测增强推断接口，输出具备法律合规与统计防御力的**无偏估计种植面积**与 **95% 置信区间**，冬小麦面积完全吻合国家统计局公布的全国常年播种红线（约 3.3 亿亩）。
 
 ### 4. 空间智能省份与国家级农业区划归属
 - 基于每个地块的 WGS84 质心坐标，自动匹配并注入所属行政省份与国家级优势农业区划（如陕西关中平原、河南南阳/豫中、江苏苏北平原、河北冀中南、山东黄河三角洲、新疆绿洲等）；
@@ -89,7 +91,8 @@ crop_area_pipeline/
     ├── vectorized_parcels.geojson             # 🗺️ 标准 OGC WGS84 平滑地块矢量边界多边形图层
     ├── vectorized_parcels_attribute_table.csv # 📋 每一个地块的属性台账 (省份、农区、面积亩数、适机性评级)
     ├── vectorized_parcels_province_summary.csv# 📊 全国各省冬小麦种植面积与集中度汇总台账
-    ├── acreage_statistics_report.csv          # 📊 官方无偏种植面积统计台账 (含95%置信区间与去偏修正量)
+    ├── acreage_statistics_report.csv          # 📊 官方无偏种植面积统计台账 (含解析标准误 SE、CV% 与 95% 置信区间)
+    ├── area_weighted_confusion_matrix.csv     # 📐 联合国手册 Table 2 规范面积加权混淆矩阵 (含 UA/PA/OA 及标准差)
     ├── crop_classification_map.tif            # 空间分类空间掩膜栅格 (可拖入 QGIS/ArcGIS)
     ├── crop_classification_map.png            # 遥感作物空间分类专题图
     ├── parcel_delineation_boundaries.png      # 零碎农田边界勾勒切分图

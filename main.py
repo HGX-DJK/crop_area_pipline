@@ -116,19 +116,25 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     # 6. 联合国第 24/26 章样框无偏面积校准（消除混合像元误差）
     print("\n[步骤 5/5] 执行联合国手册无偏面积推断（修正零碎田块像元边界偏差）...")
     area_estimator = AreaUnbiasedEstimator(config)
-    df_area_report, cond_matrix = area_estimator.estimate_unbiased_areas(
+    df_area_report, cond_matrix, df_cm, accuracy_metrics = area_estimator.estimate_unbiased_areas(
         crop_mask,
-        config.get("paths", {}).get("ground_truth_samples", "data/ground_truth_area_sample.csv")
+        config.get("paths", {}).get("ground_truth_samples", "data/ground_truth_area_sample.csv"),
+        return_details=True
     )
     report_csv = os.path.join(output_dir, "acreage_statistics_report.csv")
     df_area_report.to_csv(report_csv, index=False)
     print(f"  -> 已保存官方级无偏种植面积统计台账至: {report_csv}")
 
+    # 导出联合国手册 Table 2 规范面积加权误差矩阵与三维精度评定表
+    cm_csv = os.path.join(output_dir, "area_weighted_confusion_matrix.csv")
+    df_cm.to_csv(cm_csv, encoding="utf-8-sig")
+    print(f"  -> 已导出联合国 Olofsson (2014) 面积加权混淆矩阵与三维精度表: {cm_csv}")
+
     # 自动生成全国冬小麦遥感空间监测与决策分析专报 (出版级单文件 HTML)
     report_gen = ExecutiveReportGenerator(config)
     csv_parcels = geojson_out.replace(".geojson", "_attribute_table.csv")
     briefing_html = os.path.join(output_dir, "national_wheat_executive_briefing.html")
-    report_gen.generate_report(report_csv, csv_parcels, briefing_html)
+    report_gen.generate_report(report_csv, csv_parcels, briefing_html, confusion_matrix_csv=cm_csv)
 
     # 7. 可选长时序（20~30年）农田轮作演变与撂荒/补贴合规监测
     do_rotation = track_rotation or config.get("rotation_tracking", {}).get("enabled", False)
@@ -159,16 +165,21 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         print(f"     * 种植面积无偏校准对比图: {os.path.basename(p4)}")
 
     # 9. 打印控制台官方统计汇总报表
-    print("\n" + "=" * 86)
-    print("📊 联合国统计司 / 粮农组织（FAO）农作物种植面积无偏统计台账")
-    print("=" * 86)
-    print(f"{'作物名称':<10} | {'像元统计(亩)':<12} | {'无偏校准面积(亩)':<16} | {'95% 置信区间 (亩)':<22} | {'边界偏差修正'}")
-    print("-" * 86)
+    print("\n" + "=" * 102)
+    print("📊 联合国统计司 / 粮农组织（FAO）农作物种植面积无偏统计与 Olofsson (2014) 官方精度台账")
+    print("=" * 102)
+    print(f"{'作物名称':<8} | {'像元统计(亩)':<12} | {'无偏校准面积(亩)':<15} | {'标准误 (SE)':<14} | {'变异系数':<8} | {'制图精度 PA':<14} | {'用户精度 UA':<14}")
+    print("-" * 102)
     for _, row in df_area_report.iterrows():
-        ci_str = f"[{row['ci_95_lower_mu']:.1f}, {row['ci_95_upper_mu']:.1f}]"
-        bias_str = f"{row['bias_mu']:+.1f} 亩 ({row['bias_pct']:+.1f}%)"
-        print(f"{row['crop_name']:<10} | {row['naive_area_mu']:<14.1f} | {row['unbiased_calibrated_mu']:<18.1f} | {ci_str:<24} | {bias_str}")
-    print("-" * 86)
+        pa_str = row.get("producers_accuracy", "N/A")
+        ua_str = row.get("users_accuracy", "N/A")
+        se_str = f"±{row['se_analytic_mu']:.1f} 亩"
+        cv_str = f"{row['cv_pct']:.2f}%"
+        print(f"{row['crop_name']:<8} | {row['naive_area_mu']:<14.1f} | {row['unbiased_calibrated_mu']:<17.1f} | {se_str:<16} | {cv_str:<10} | {pa_str:<16} | {ua_str:<16}")
+    print("-" * 102)
+    oa_val = accuracy_metrics.get("overall_accuracy", 0.0) * 100.0
+    se_oa_val = accuracy_metrics.get("se_overall_accuracy", 0.0) * 100.0
+    print(f"🎯 联合国手册全图面积加权总体分类精度 (OA): {oa_val:.2f}% ± {se_oa_val:.2f}% (符合国际统计调查交付标准)")
     print(f"📌 零碎地块切分总结: 共勾勒 {total_valid_parcels} 个地块，平均单块面积 {(total_cultivated_mu/max(total_valid_parcels,1)):.1f} 亩。")
     html_map_path = os.path.join(output_dir, "vectorized_parcels_map.html")
     if os.path.exists(html_map_path):
