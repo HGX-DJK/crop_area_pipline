@@ -10,10 +10,13 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, cohen_kappa_score
 from sklearn.model_selection import StratifiedKFold
 
+from src.utils.logger import get_logger, log_success
+
 
 class CropClassifier:
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("作物分类")
         cls_cfg = self.config.get("classification", {})
         self.model_type = cls_cfg.get("model_type", "random_forest").lower()
         self.n_estimators = cls_cfg.get("n_estimators", 100)
@@ -62,7 +65,7 @@ class CropClassifier:
 
             # 自适应特征时序维度对齐
             if target_t is not None and target_t != raw_ts.shape[1]:
-                print(f"[分类器特征对齐] 输入影像时相数 (T={target_t}) 与标定样本基准 (T={raw_ts.shape[1]}) 不同，正在执行自适应对齐...")
+                self.logger.info(f"输入影像时相数 (T={target_t}) 与标定样本基准 (T={raw_ts.shape[1]}) 不同，正在执行自适应对齐...")
                 if target_t == 1:
                     # 单时相影像：匹配对应 DOY 或提取盛夏作物生长峰值期 (DOY 200)
                     if doy_list and len(doy_list) > 0:
@@ -70,7 +73,7 @@ class CropClassifier:
                     else:
                         closest_idx = int(np.argmin([abs(d - 200) for d in sample_doys]))
                     ts_values = raw_ts[:, [closest_idx]]
-                    print(f"  -> 自动匹配提取对应生长旺季 DOY {sample_doys[closest_idx]} 单时相物候特征")
+                    self.logger.info(f"  -> 自动匹配提取对应生长旺季 DOY {sample_doys[closest_idx]} 单时相物候特征")
                 else:
                     # 多时相数量差异：沿时间轴执行物候曲线线性插值对齐
                     target_doys = doy_list if (doy_list and len(doy_list) == target_t) else np.linspace(sample_doys[0], sample_doys[-1], target_t)
@@ -79,7 +82,7 @@ class CropClassifier:
                         interp_row = np.interp(target_doys, sample_doys, row)
                         aligned_list.append(interp_row)
                     ts_values = np.array(aligned_list, dtype=np.float32)
-                    print(f"  -> 成功将标定样本插值对齐至目标 {target_t} 个生长时相")
+                    self.logger.info(f"  -> 成功将标定样本插值对齐至目标 {target_t} 个生长时相")
             else:
                 ts_values = raw_ts
 
@@ -116,8 +119,8 @@ class CropClassifier:
         self.model.fit(X, y)
         self.is_trained = True
 
-        print(f"[分类器] 基于 {len(df)} 个样本完成 {self.model_type.upper()} 模型训练 (输入特征数: {X.shape[1]})。")
-        print(f"[评估] 5折交叉验证总体精度 (OA): {oa * 100:.2f}%, Kappa系数: {kappa:.3f}")
+        log_success(self.logger, f"基于 {len(df)} 个样本完成 {self.model_type.upper()} 模型训练 (输入特征数: {X.shape[1]})。")
+        self.logger.info(f"5折交叉验证总体精度 (OA): {oa * 100:.2f}%, Kappa系数: {kappa:.3f}")
         return self.metrics
 
     def fit_from_arrays(self, X_train, y_train):

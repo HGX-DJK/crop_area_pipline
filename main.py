@@ -27,23 +27,24 @@ from src.visualizer import Visualizer
 from src.raster_loader import RasterLoader
 from src.rotation_tracker import CropRotationTracker
 from src.report_generator import ExecutiveReportGenerator
-from src.utils.logger import validate_config, get_logger
+from src.utils.logger import validate_config, get_logger, log_success
 
 
 def load_config(config_path="config.yaml"):
+    logger = get_logger("配置检查")
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"未找到配置文件: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     is_valid, errors = validate_config(cfg)
     if not is_valid:
-        print("⚠️ 配置文件自校验提示:")
         for err in errors:
-            print(f"   • {err}")
+            logger.warning(f"配置校验项: {err}")
     return cfg
 
 
-def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False):
+def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False):
+    logger = get_logger("流水线", quiet=quiet)
     print("=" * 76)
     print("🌾 联合国农业统计遥感手册标准：农作物种植区域提取与零碎地块矢量化系统")
     print("=" * 76)
@@ -61,7 +62,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         config.setdefault("input_source", {})["geotiff_dir"] = override_geotiff_dir
 
     spatial_res = config.get("spatial", {}).get("resolution_meters", 10.0)
-    print(f"[初始化] 加载配置成功，空间分辨率: {spatial_res} 米，投影坐标系: {config.get('spatial', {}).get('crs', 'EPSG:32650')}")
+    logger.info(f"加载配置成功，空间分辨率: {spatial_res} 米，投影坐标系: {config.get('spatial', {}).get('crs', 'EPSG:32650')}")
 
     # 2. 构建多时相卫星时序立方体与物候特征工程
     ts_builder = TimeSeriesBuilder(config)
@@ -70,7 +71,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
 
     if input_mode == "geotiff":
         tif_dir = config.get("input_source", {}).get("geotiff_dir", "data/satellite_tifs")
-        print(f"\n[步骤 1/5] 正在从真实 GeoTIFF 目录加载遥感影像时序: {tif_dir}")
+        logger.info(f"[步骤 1/5] 正在从真实 GeoTIFF 目录加载遥感影像时序: {tif_dir}")
         loader = RasterLoader(config)
         raster_cube, geo_info, doy_list = loader.load_multitemporal_tifs(tif_dir)
         if geo_info and "resolution_meters" in geo_info:
@@ -78,19 +79,19 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
             config.setdefault("spatial", {})["resolution_meters"] = spatial_res
             if "crs" in geo_info:
                 config.setdefault("spatial", {})["crs"] = geo_info["crs"]
-            print(f"  -> 自动对齐影像地面物理分辨率: {spatial_res:.2f} 米/像元。")
+            logger.info(f"  -> 自动对齐影像地面物理分辨率: {spatial_res:.2f} 米/像元。")
         feature_cube = ts_builder.extract_phenological_features(raster_cube)
-        print(f"  -> 已基于真实影像构建特征立方体，尺寸: {raster_cube.shape[0]} × {raster_cube.shape[1]}，时相数: {raster_cube.shape[2]}。")
+        logger.info(f"  -> 已基于真实影像构建特征立方体，尺寸: {raster_cube.shape[0]} × {raster_cube.shape[1]}，时相数: {raster_cube.shape[2]}。")
     else:
-        print("\n[步骤 1/5] 构建多时相卫星时序立方体与提取作物物候指纹 (基准仿真模式)...")
+        logger.info("[步骤 1/5] 构建多时相卫星时序立方体与提取作物物候指纹 (基准仿真模式)...")
         # 生成/加载标准测试场景 (120x120 像素，包含零碎农田、1~2像素窄田埂与背景地物)
         landscape = ts_builder.generate_synthetic_agricultural_landscape(rows=120, cols=120)
         raster_cube = landscape["raster_cube"]  # (Rows, Cols, 8个时相)
         feature_cube = ts_builder.extract_phenological_features(raster_cube)
-        print(f"  -> 已构建多时相特征立方体，像元规模: {landscape['rows']} × {landscape['cols']}，单像元物候特征数: {feature_cube.shape[2]}。")
+        logger.info(f"  -> 已构建多时相特征立方体，像元规模: {landscape['rows']} × {landscape['cols']}，单像元物候特征数: {feature_cube.shape[2]}。")
 
     # 3. 训练作物分类器并全域推断
-    print("\n[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
+    logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
     classifier = CropClassifier(config)
 
     classifier.train_with_samples(
@@ -101,18 +102,18 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     )
 
     crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
-    print(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
+    logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
-    print("\n[步骤 3/5] 执行形态学边缘腐蚀与狭窄田埂切分（切分零碎小田块）...")
+    logger.info("[步骤 3/5] 执行形态学边缘腐蚀与狭窄田埂切分（切分零碎小田块）...")
     segmenter = ParcelSegmenter(config)
     parcel_id_mask, parcel_metadata = segmenter.segment_parcels(crop_mask, conf_map)
     total_valid_parcels = len(parcel_metadata)
     total_cultivated_mu = sum(p["area_mu"] for p in parcel_metadata)
-    print(f"  -> 成功勾勒并分离 {total_valid_parcels} 个独立农田地块，累计净耕地面积: {total_cultivated_mu:.1f} 亩。")
+    logger.info(f"  -> 成功勾勒并分离 {total_valid_parcels} 个独立农田地块，累计净耕地面积: {total_cultivated_mu:.1f} 亩。")
 
     # 5. 导出标准 GIS 矢量地块与属性清单（含农机作业适宜度与紧凑度评估）
-    print("\n[步骤 4/5] 导出 OGC 标准 GeoJSON 地块矢量边界与属性台账清单...")
+    logger.info("[步骤 4/5] 导出 OGC 标准 GeoJSON 地块矢量边界与属性台账清单...")
     exporter = VectorExporter(config)
     geojson_out = os.path.join(output_dir, "vectorized_parcels.geojson")
     exporter.export_geojson(parcel_id_mask, parcel_metadata, geojson_out, geo_info=geo_info)
@@ -121,7 +122,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         exporter.export_geotiff(crop_mask, geo_info, tif_out)
 
     # 6. 联合国第 24/26 章样框无偏面积校准（消除混合像元误差）
-    print("\n[步骤 5/5] 执行联合国手册无偏面积推断（修正零碎田块像元边界偏差）...")
+    logger.info("[步骤 5/5] 执行联合国手册无偏面积推断（修正零碎田块像元边界偏差）...")
     area_estimator = AreaUnbiasedEstimator(config)
     df_area_report, cond_matrix, df_cm, accuracy_metrics = area_estimator.estimate_unbiased_areas(
         crop_mask,
@@ -130,17 +131,16 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     )
     report_csv = os.path.join(output_dir, "acreage_statistics_report.csv")
     df_area_report.to_csv(report_csv, index=False)
-    print(f"  -> 已保存官方级无偏种植面积统计台账至: {report_csv}")
+    log_success(logger, f"已保存官方级无偏种植面积统计台账至: {report_csv}")
 
     # 导出联合国手册 Table 2 规范面积加权误差矩阵与三维精度评定表
     cm_csv = os.path.join(output_dir, "area_weighted_confusion_matrix.csv")
     df_cm.to_csv(cm_csv, encoding="utf-8-sig")
-    print(f"  -> 已导出联合国 Olofsson (2014) 面积加权混淆矩阵与三维精度表: {cm_csv}")
+    log_success(logger, f"已导出联合国 Olofsson (2014) 面积加权混淆矩阵与三维精度表: {cm_csv}")
 
     # 可选：联合国手册事前样方抽样方案设计 (Neyman Optimal Allocation)
     if sample_plan:
-        print("\n" + "-" * 76)
-        print("📋 [联合国手册事前抽样设计] 基于 Neyman 最佳分层抽样算法输出实地调查方案...")
+        logger.info("[事前抽样设计] 基于 Neyman 最佳分层抽样算法输出实地调查方案...")
         df_sample_plan = area_estimator.design_optimal_sample_allocation(
             total_sample_budget=150,
             crop_classified_mask=crop_mask,
@@ -148,25 +148,24 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         )
         plan_csv = os.path.join(output_dir, "sample_allocation_plan.csv")
         area_estimator.export_sampling_plan(df_sample_plan, output_csv=plan_csv)
-        print(f"  -> 目标总预算 150 个样方，已导出《国家样方抽样设计清单》至: {plan_csv}")
+        log_success(logger, f"目标总预算 150 个样方，已导出《国家样方抽样设计清单》至: {plan_csv}")
         for _, r in df_sample_plan.iterrows():
-            print(f"     * {r['crop_name']:<8}: 分配 {r['recommended_sample_n']:>3} 个样框 ({r['sample_ratio_pct']:>4.1f}%) | 面积占比: {r['stratum_weight_Wh']*100:>4.1f}%")
+            logger.info(f"  * {r['crop_name']:<8}: 分配 {r['recommended_sample_n']:>3} 个样框 ({r['sample_ratio_pct']:>4.1f}%) | 面积占比: {r['stratum_weight_Wh']*100:>4.1f}%")
 
     # 7. 可选长时序（20~30年）农田轮作演变与撂荒/补贴合规监测
     do_rotation = track_rotation or config.get("rotation_tracking", {}).get("enabled", False)
     comp_csv = None
     if do_rotation:
-        print("\n" + "-" * 76)
-        print("🌱 [长时序监测拓展] 执行多年期作物轮作演变矩阵与撂荒/粮豆补贴合规分析...")
+        logger.info("[长时序监测拓展] 执行多年期作物轮作演变矩阵与撂荒/粮豆补贴合规分析...")
         rot_tracker = CropRotationTracker(config)
         # 生成前期参考期基准（若无外部历史数据则基于演化规律生成高保真基线）
         early_mask = rot_tracker.simulate_historical_transition(crop_mask, years_span=5)
         df_trans, df_comp = rot_tracker.analyze_transition(early_mask, crop_mask, year_early=2020, year_late=2024)
         _, comp_csv = rot_tracker.export_rotation_report(df_trans, df_comp, output_dir=output_dir)
 
-        print("\n📋 跨期作物轮作合规与业务预警清单:")
+        logger.info("跨期作物轮作合规与业务预警清单:")
         for _, row in df_comp.iterrows():
-            print(f"   {row['监测类型']}: {row['涉及面积(亩)']} 亩 -> {row['业务建议']}")
+            logger.info(f"  * {row['监测类型']}: {row['涉及面积(亩)']} 亩 -> {row['业务建议']}")
 
     # 8. 生成出版级可视化成果图表
     if config.get("visualization", {}).get("generate_plots", True):
@@ -175,11 +174,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         p2 = viz.plot_crop_classification_map(crop_mask)
         p3 = viz.plot_parcel_delineation(parcel_id_mask, raster_cube)
         p4 = viz.plot_area_comparison(df_area_report)
-        print(f"\n  -> 已在 '{output_dir}/' 目录下生成 4 幅出版级高清成果图:")
-        print(f"     * 作物物候特征指纹曲线: {os.path.basename(p1)}")
-        print(f"     * 遥感作物空间分类专题图: {os.path.basename(p2)}")
-        print(f"     * 零碎农田边界勾勒切分图: {os.path.basename(p3)}")
-        print(f"     * 种植面积无偏校准对比图: {os.path.basename(p4)}")
+        log_success(logger, f"已在 '{output_dir}/' 目录下生成 4 幅出版级高清成果图: {os.path.basename(p1)}, {os.path.basename(p2)}, {os.path.basename(p3)}, {os.path.basename(p4)}")
 
     # 9. 编译生成出版级综合图文决策分析专报 (单文件 HTML，内嵌成果画廊与轮作分析)
     report_gen = ExecutiveReportGenerator(config)
@@ -232,6 +227,7 @@ if __name__ == "__main__":
     parser.add_argument("--track-rotation", action="store_true", help="是否同时执行长时序作物轮作演变、撂荒与粮豆补贴合规分析")
     parser.add_argument("--sample-plan", action="store_true", help="是否执行联合国手册 Neyman 最优分层样方抽样设计并导出规划清单")
     parser.add_argument("--self-check", action="store_true", help="一键执行全系统自动化测试与健康自检")
+    parser.add_argument("--quiet", action="store_true", help="开启静默模式，仅输出最终统计台账与严重错误")
     args = parser.parse_args()
 
     if args.self_check:
@@ -245,5 +241,6 @@ if __name__ == "__main__":
         override_geotiff_dir=args.geotiff_dir,
         override_output_dir=args.output_dir,
         track_rotation=args.track_rotation,
-        sample_plan=args.sample_plan
+        sample_plan=args.sample_plan,
+        quiet=args.quiet
     )

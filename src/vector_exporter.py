@@ -48,6 +48,7 @@ from src.utils.agri_zoning import (
     get_scale_tier,
 )
 from src.utils.unit_utils import sqm_to_mu, sqm_to_ha
+from src.utils.logger import get_logger, log_success
 from src.webgis_builder import WebGISDashboardBuilder
 
 
@@ -56,6 +57,7 @@ class VectorExporter:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
+        self.logger = get_logger("矢量导出")
         spatial = self.config.get("spatial", {})
         self.resolution = spatial.get("resolution_meters", 10.0)
         self.crs = spatial.get("crs", "EPSG:32650")
@@ -203,7 +205,7 @@ class VectorExporter:
         h_mask, w_mask = parcel_id_mask.shape
 
         total_p = len(parcel_metadata)
-        print(f"[矢量导出] 开始执行 {total_p} 个主力核心地块的高精度轮廓跟踪与拓扑平滑...")
+        self.logger.info(f"开始执行 {total_p} 个主力核心地块的高精度轮廓跟踪与拓扑平滑...")
 
         for idx, meta in enumerate(parcel_metadata, 1):
             pid = meta["internal_id"]
@@ -284,7 +286,7 @@ class VectorExporter:
             }
             features.append(feature)
             if idx % 100 == 0 or idx == total_p:
-                print(f"  -> 矢量化进度: {idx}/{total_p} 个地块边界已完成。")
+                self.logger.info(f"  -> 矢量化进度: {idx}/{total_p} 个地块边界已完成。")
 
         # 构建规范 FeatureCollection
         crs_urn = "urn:ogc:def:crs:OGC:1.3:CRS84" if is_wgs84 else f"urn:ogc:def:crs:OGC:1.3:{self.crs}"
@@ -310,14 +312,13 @@ class VectorExporter:
             f.write(compact_json)
 
         crs_desc = "WGS84 经纬度 [lon, lat] (RFC 7946 国际标准)" if is_wgs84 else f"UTM 投影米制坐标 [{self.crs}]"
-        print(f"[矢量导出] 已成功生成地块矢量 GeoJSON: {output_path}")
-        print(f"  -> 坐标系统: {crs_desc}，共包含 {len(features)} 个独立闭合农田要素。")
+        log_success(self.logger, f"已成功生成地块矢量 GeoJSON: {output_path} (共包含 {len(features)} 个独立要素，坐标系: {crs_desc})")
 
         # 同步导出属性列表 CSV（包含经纬度与投影坐标两套字段）
         csv_path = output_path.replace(".geojson", "_attribute_table.csv")
         df_props = pd.DataFrame([feat["properties"] for feat in features])
         df_props.to_csv(csv_path, index=False, encoding="utf-8-sig")
-        print(f"[矢量导出] 已成功保存地块属性台账清单至: {csv_path}")
+        self.logger.info(f"已成功保存地块属性台账清单至: {csv_path}")
 
         # 自动生成分省种植面积与集中度汇总台账
         if "province" in df_props.columns and len(df_props) > 0:
@@ -338,7 +339,7 @@ class VectorExporter:
             
             prov_csv = output_path.replace(".geojson", "_province_summary.csv")
             prov_summary.to_csv(prov_csv, index=False, encoding="utf-8-sig")
-            print(f"[空间统计] 已成功生成分省农作物种植面积与集中度汇总表至: {prov_csv}")
+            self.logger.info(f"已成功生成分省农作物种植面积与集中度汇总表至: {prov_csv}")
 
         # 若为 WGS84 标准经纬度，自动输出单文件极速交互式 Web 卫星地图（双击直接在浏览器打开）
         if is_wgs84:
@@ -354,8 +355,7 @@ class VectorExporter:
         """
         builder = WebGISDashboardBuilder(self.config)
         res = builder.build_dashboard(geojson_data, output_html_path)
-        print(f"[交互地图] 已成功生成数字农情驾驶舱 Web 卫星地图: {output_html_path}")
-        print(f"           (支持按省筛选、Top 10 主力基地直达导航、三套底图自由切换、GeoJSON一键导出)")
+        log_success(self.logger, f"已成功生成数字农情驾驶舱 Web 卫星地图: {output_html_path}")
         return res
 
     def export_geotiff(self, classified_mask: np.ndarray, geo_info: dict, output_tif_path: str = "output/crop_classification_map.tif") -> Optional[str]:
@@ -380,8 +380,8 @@ class VectorExporter:
             with rasterio.open(output_tif_path, "w", **meta) as dst:
                 dst.write(classified_mask.astype(np.uint8), 1)
 
-            print(f"[栅格导出] 已成功保存带地理坐标与 LZW 无损压缩的分类 GeoTIFF: {output_tif_path}")
+            log_success(self.logger, f"已成功保存带地理坐标与 LZW 无损压缩的分类 GeoTIFF: {output_tif_path}")
             return output_tif_path
         except ImportError:
-            print("[提示] 未安装 rasterio，跳过真实 GeoTIFF 导出（GeoJSON 与 PNG 仍正常输出）。")
+            self.logger.warning("未安装 rasterio，跳过真实 GeoTIFF 导出（GeoJSON 与 PNG 仍正常输出）。")
             return None

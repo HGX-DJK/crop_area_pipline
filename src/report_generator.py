@@ -16,12 +16,15 @@ import datetime
 import pandas as pd
 import numpy as np
 
+from src.utils.logger import get_logger, log_success
+
 
 class ExecutiveReportGenerator:
     """出版级官方决策分析专报生成器 (HTML / 打印 / PDF)"""
 
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("专报生成")
         self.crop_legend = self.config.get("crop_legend", {
             0: "非农田/背景",
             1: "夏玉米",
@@ -138,8 +141,7 @@ class ExecutiveReportGenerator:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(full_html)
 
-        print(f"[专报规范化] 已成功生成出版级决策分析专报: {output_path}")
-        print(f"             - 包含：全域指标看板、联合国 Table 2 精度矩阵、图文专题画廊、分省集聚度、Top 10基地、A4打印排版")
+        log_success(self.logger, f"已成功生成出版级官方决策专报: {output_path} (含指标看板、联合国Table 2精度矩阵、成果画廊与A4打印优化)")
         return output_path
 
     # =========================================================================

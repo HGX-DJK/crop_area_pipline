@@ -15,6 +15,7 @@ from src.utils.geo_utils import (
     is_geographic_system,
     estimate_resolution_meters,
 )
+from src.utils.logger import get_logger, log_success
 
 # 优雅导入地理空间处理库，若未安装则提供友好提示
 try:
@@ -27,6 +28,7 @@ except ImportError:
 class RasterLoader:
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("栅格加载")
         self.spatial_cfg = self.config.get("spatial", {})
 
     def load_multitemporal_tifs(self, tif_dir_or_list):
@@ -56,10 +58,10 @@ class RasterLoader:
             raise FileNotFoundError(f"未在指定路径检索到任何 GeoTIFF (.tif) 影像文件: {tif_dir_or_list}")
 
         if not HAS_RASTERIO:
-            print("[提示] 未检测到 rasterio 地理空间库。如需直接解析真实 GeoTIFF 的坐标与投影，请执行: pip install rasterio")
+            self.logger.warning("未检测到 rasterio 地理空间库。如需直接解析真实 GeoTIFF 的坐标与投影，请执行: pip install rasterio")
             raise ImportError("缺少 rasterio 库，无法解析带有地理坐标的真实 GeoTIFF 影像。")
 
-        print(f"[栅格加载] 检索到 {len(tif_files)} 景多时相遥感影像，正在解析时相与空间信息...")
+        self.logger.info(f"检索到 {len(tif_files)} 景多时相遥感影像，正在解析时相与空间信息...")
 
         band_arrays = []
         doy_list = []
@@ -95,7 +97,7 @@ class RasterLoader:
 
                 # 检查是否为单景多波段时序立方体
                 if len(tif_files) == 1 and src.count > 1:
-                    print(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")
+                    self.logger.info(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")
                     for b in range(1, src.count + 1):
                         arr = src.read(b).astype(np.float32)
                         if src.nodata is not None:
@@ -118,7 +120,6 @@ class RasterLoader:
         # 堆叠为三维立方体 (Rows, Cols, T)
         raster_cube = np.stack(band_arrays, axis=-1)
         res_desc = f"{geo_info['resolution_x']:.5f} 度 (约 {geo_info['resolution_meters']:.1f} 米)" if geo_info.get("is_geographic") else f"{geo_info['resolution_x']:.2f} 米"
-        print(f"[栅格加载] 影像堆叠完成，空间尺寸: {geo_info['height']} 行 × {geo_info['width']} 列，覆盖 {len(doy_list)} 个生长时相。")
-        print(f"           坐标参考系: {geo_info['crs']}，空间分辨率: {res_desc}。")
+        log_success(self.logger, f"影像堆叠完成，空间尺寸: {geo_info['height']} 行 × {geo_info['width']} 列，覆盖 {len(doy_list)} 个生长时相 (CRS: {geo_info['crs']}，空间分辨率: {res_desc})")
 
         return raster_cube, geo_info, doy_list

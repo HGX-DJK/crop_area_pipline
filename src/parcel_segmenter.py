@@ -12,11 +12,13 @@ import numpy as np
 from scipy import ndimage
 
 from src.utils.unit_utils import sqm_to_mu, sqm_to_ha
+from src.utils.logger import get_logger, log_success
 
 
 class ParcelSegmenter:
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("地块分割")
         seg_cfg = self.config.get("segmentation", {})
         self.apply_erosion = seg_cfg.get("apply_boundary_erosion", True)
         self.min_area_m2 = seg_cfg.get("min_parcel_area_m2", 200.0)
@@ -75,7 +77,7 @@ class ParcelSegmenter:
         struct_conn = ndimage.generate_binary_structure(2, 2 if self.connectivity == 8 else 1)
         labeled_array, num_features = ndimage.label(cleaned, structure=struct_conn)
 
-        print(f"[地块分割] 初步识别到 {num_features} 个候选连通斑块。")
+        self.logger.info(f"初步识别到 {num_features} 个候选连通斑块。")
 
         # 5. 自适应面积阈值过滤与元数据提取
         # 针对高分辨率影像 (10m 哨兵 / 2m 高分)，严格使用 200㎡ ~ 500,000㎡ 规整小农地块阈值；
@@ -83,8 +85,7 @@ class ParcelSegmenter:
         if self.pixel_area_m2 > self.max_area_m2:
             eff_min_area = self.pixel_area_m2 * 1.0
             eff_max_area = self.pixel_area_m2 * 20000.0
-            print(f"[地块分割自适应] 当前输入影像为宏观尺度遥感图 (像元跨度: {self.spatial_res:.1f}米，单像元面积: {sqm_to_mu(self.pixel_area_m2, 1):.1f}亩)，")
-            print(f"                 已自动将地块过滤上下限动态调整为 {sqm_to_mu(eff_min_area, 1):.1f} ~ {sqm_to_mu(eff_max_area, 1):.1f} 亩。")
+            self.logger.info(f"当前输入影像为宏观尺度遥感图 (像元跨度: {self.spatial_res:.1f}米，单像元面积: {sqm_to_mu(self.pixel_area_m2, 1):.1f}亩)，已自动将地块过滤上下限动态调整为 {sqm_to_mu(eff_min_area, 1):.1f} ~ {sqm_to_mu(eff_max_area, 1):.1f} 亩。")
         else:
             eff_min_area = self.min_area_m2
             eff_max_area = self.max_area_m2
@@ -109,9 +110,9 @@ class ParcelSegmenter:
             residual_indices = comp_indices[self.max_export_parcels:]
             selected_m2 = float(sum(component_sizes[cid - 1] for cid in selected_indices)) * self.pixel_area_m2
             residual_m2 = float(sum(component_sizes[cid - 1] for cid in residual_indices)) * self.pixel_area_m2
-            print(f"[地块分割] 候选斑块数量较多 ({num_features}个，全量连通面积约 {total_candidate_mu/10000.0:.1f} 万亩)：")
-            print(f"           - 优选面积前 {self.max_export_parcels} 个主力核心集中区进行高精度矢量化（约 {sqm_to_mu(selected_m2)/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
-            print(f"           - 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {sqm_to_mu(residual_m2)/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
+            self.logger.info(f"候选斑块数量较多 ({num_features}个，全量连通面积约 {total_candidate_mu/10000.0:.1f} 万亩)：")
+            self.logger.info(f"  -> 优选面积前 {self.max_export_parcels} 个主力核心集中区进行高精度矢量化（约 {sqm_to_mu(selected_m2)/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
+            self.logger.info(f"  -> 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {sqm_to_mu(residual_m2)/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
             comp_indices = selected_indices
 
         # 预计算各斑块的最小外包矩形切片，避免每次对全图进行几千万像素的大矩阵遍历
@@ -172,5 +173,5 @@ class ParcelSegmenter:
             })
             valid_parcel_id += 1
 
-        print(f"[地块分割] 过滤细碎杂斑后，成功提取 {len(parcel_metadata)} 个有效规范农田地块。")
+        log_success(self.logger, f"过滤细碎杂斑后，成功提取 {len(parcel_metadata)} 个有效规范农田地块。")
         return parcel_id_mask, parcel_metadata

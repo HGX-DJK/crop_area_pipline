@@ -13,11 +13,13 @@ import numpy as np
 import pandas as pd
 
 from src.utils.unit_utils import MU_PER_SQM
+from src.utils.logger import get_logger, log_success
 
 
 class CropRotationTracker:
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("轮作监测")
         self.spatial_res = (self.config.get("spatial") or {}).get("resolution_meters", 10.0)
         self.crop_legend = self.config.get("crop_legend", {
             0: "非农田/背景/休耕",
@@ -146,7 +148,5 @@ class CropRotationTracker:
         df_trans.to_csv(trans_csv, encoding="utf-8-sig")
         df_compliance.to_csv(comp_csv, index=False, encoding="utf-8-sig")
 
-        print(f"\n[长时序分析] 已成功输出作物轮作演变台账:")
-        print(f"  * 转移矩阵表: {trans_csv}")
-        print(f"  * 轮作/撂荒预警清单: {comp_csv}")
+        log_success(self.logger, f"已成功输出作物轮作演变台账与预警清单: {trans_csv}, {comp_csv}")
         return trans_csv, comp_csv
