@@ -18,6 +18,7 @@ from src.utils.plot_utils import (
     get_crop_colormap,
     downsample_raster_preview,
 )
+from src.utils.logger import get_logger, log_success
 
 # 自动配置跨平台中文字体支持（Windows 微软雅黑、Linux Noto/文泉驿、macOS 苹方）
 setup_chinese_fonts()
@@ -27,6 +28,7 @@ setup_chinese_fonts()
 class Visualizer:
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("可视化制图")
         self.output_dir = self.config.get("paths", {}).get("output_dir", "output")
         self.dpi = self.config.get("visualization", {}).get("plot_dpi", 300)
         self.crop_legend = self.config.get("crop_legend", {

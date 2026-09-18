@@ -20,11 +20,14 @@ import numpy as np
 import pandas as pd
 
 from src.utils.unit_utils import sqm_to_mu, sqm_to_ha, MU_PER_SQM
+from src.utils.logger import get_logger, log_success
 
 
 class AreaUnbiasedEstimator:
     def __init__(self, config=None):
         self.config = config or {}
+        self.logger = get_logger("无偏估计")
+        self.random_state = self.config.get("classification", {}).get("random_state", 42)
         ppi_cfg = self.config.get("unbiased_area_inference", {})
         self.n_bootstrap = ppi_cfg.get("n_bootstrap", 2000)
         self.alpha = 1.0 - ppi_cfg.get("confidence_level", 0.95)
