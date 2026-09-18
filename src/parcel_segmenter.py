@@ -59,6 +59,7 @@ class ParcelSegmenter:
 
         # 将不同作物交界处切开
         cropland_binary[gradient_edges] = 0
+        del gradient_edges  # 立即释放边界梯度掩膜内存
 
         # 3. 形态学腐蚀（Erosion）与开运算（Opening）切断细小桥接
         # 仅针对高分辨率影像（像元 < 20米）执行田埂切分；对于中低分辨率/宏观尺度栅格，单个像元已远大于真实田埂，跳过腐蚀以防过度消除
@@ -69,6 +70,7 @@ class ParcelSegmenter:
             k_size = min(k_size, 9)
             structure = np.ones((k_size, k_size), dtype=np.uint8) if self.connectivity == 8 else ndimage.generate_binary_structure(2, 1)
             cleaned = ndimage.binary_opening(cropland_binary, structure=structure).astype(np.uint8)
+            del cropland_binary  # 释放原始二值掩膜
         else:
             cleaned = cropland_binary
 
@@ -79,6 +81,7 @@ class ParcelSegmenter:
         # 4. 连通域标记（Connected Component Labeling）
         struct_conn = ndimage.generate_binary_structure(2, 2 if self.connectivity == 8 else 1)
         labeled_array, num_features = ndimage.label(cleaned, structure=struct_conn)
+        del cleaned  # 释放清洗掩膜，避免与标记数组并存浪费内存
 
         self.logger.info(f"初步识别到 {num_features} 个候选连通斑块。")
 
@@ -101,37 +104,51 @@ class ParcelSegmenter:
         if num_features > 0:
             counts = np.bincount(labeled_array.ravel())
             component_sizes = counts[1:num_features + 1]
+            candidate_areas_m2 = component_sizes * self.pixel_area_m2
         else:
             component_sizes = np.array([], dtype=np.int64)
+            candidate_areas_m2 = np.array([], dtype=np.float64)
+
         total_candidate_m2 = float(np.sum(component_sizes)) * self.pixel_area_m2
         total_candidate_mu = sqm_to_mu(total_candidate_m2, 2)
 
-        # 利用底层 C 级 argsort 极速降序排序，按面积从大到小优选主力地块
+        # 核心修正：必须【先基于面积有效性过滤】，再在合规地块中按面积优选 Top N 主力地块！
         if num_features > 0:
-            sorted_order = np.argsort(-component_sizes)
-            comp_indices = (sorted_order + 1).tolist()
+            # 1. 优先在标准地块面积区间 [eff_min_area, eff_max_area] 内筛选
+            valid_mask = (candidate_areas_m2 >= eff_min_area) & (candidate_areas_m2 <= eff_max_area)
+            valid_comp_indices = np.where(valid_mask)[0] + 1
+
+            # 2. 宏观自适应兜底：若全图为宏观大幅宽大平原，连通斑块普遍大于小农上限，自动放宽上限保留主力核心产区
+            if len(valid_comp_indices) == 0:
+                self.logger.warning(f"全域候选斑块均大于设定的单块上限 ({sqm_to_mu(eff_max_area, 1):.1f} 亩)，已自动激活宏观农业大基地自适应放宽机制...")
+                valid_mask = (candidate_areas_m2 >= eff_min_area)
+                valid_comp_indices = np.where(valid_mask)[0] + 1
+
+            # 3. 在真正合规的候选斑块中，按面积降序排列优选主力地块
+            sorted_order = np.argsort(-candidate_areas_m2[valid_comp_indices - 1])
+            sorted_valid = valid_comp_indices[sorted_order]
+
+            if len(sorted_valid) > self.max_export_parcels:
+                comp_indices = sorted_valid[:self.max_export_parcels].tolist()
+                residual_indices = sorted_valid[self.max_export_parcels:].tolist()
+                selected_m2 = float(np.sum(candidate_areas_m2[np.array(comp_indices) - 1]))
+                residual_m2 = float(np.sum(candidate_areas_m2[np.array(residual_indices) - 1]))
+                self.logger.info(f"成功识别到 {len(sorted_valid)} 个合规独立农田地块 (候选总面积约 {total_candidate_mu/10000.0:.1f} 万亩)：")
+                self.logger.info(f"  -> 优选面积前 {len(comp_indices)} 个主力核心集中区进行高精度矢量化（约 {sqm_to_mu(selected_m2)/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
+                self.logger.info(f"  -> 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {sqm_to_mu(residual_m2)/10000.0:.1f} 万亩），已在无偏统计总表中完整纳统。")
+            else:
+                comp_indices = sorted_valid.tolist()
+                selected_m2 = float(np.sum(candidate_areas_m2[np.array(comp_indices) - 1])) if len(comp_indices) > 0 else 0.0
+                self.logger.info(f"成功筛选到 {len(comp_indices)} 个符合面积规范的独立农田地块 (累计面积: {sqm_to_mu(selected_m2):.1f} 亩)。")
         else:
             comp_indices = []
-        if len(comp_indices) > self.max_export_parcels:
-            selected_indices = comp_indices[:self.max_export_parcels]
-            residual_indices = comp_indices[self.max_export_parcels:]
-            selected_m2 = float(sum(component_sizes[cid - 1] for cid in selected_indices)) * self.pixel_area_m2
-            residual_m2 = float(sum(component_sizes[cid - 1] for cid in residual_indices)) * self.pixel_area_m2
-            self.logger.info(f"候选斑块数量较多 ({num_features}个，全量连通面积约 {total_candidate_mu/10000.0:.1f} 万亩)：")
-            self.logger.info(f"  -> 优选面积前 {self.max_export_parcels} 个主力核心集中区进行高精度矢量化（约 {sqm_to_mu(selected_m2)/10000.0:.1f} 万亩，占 {(selected_m2/max(total_candidate_m2,1e-6))*100:.1f}%）；")
-            self.logger.info(f"  -> 剩余 {len(residual_indices)} 个长尾散碎零星斑块（约 {sqm_to_mu(residual_m2)/10000.0:.1f} 万亩，占 {(residual_m2/max(total_candidate_m2,1e-6))*100:.1f}%），已在无偏统计总表中完整纳统。")
-            comp_indices = selected_indices
 
         # 预计算各斑块的最小外包矩形切片，避免每次对全图进行几千万像素的大矩阵遍历
         slices = ndimage.find_objects(labeled_array)
 
         for comp_id in comp_indices:
             pixel_count = component_sizes[comp_id - 1]
-            area_m2 = pixel_count * self.pixel_area_m2
-            
-            # 过滤面积过小或过大的异常斑块
-            if area_m2 < eff_min_area or area_m2 > eff_max_area:
-                continue
+            area_m2 = candidate_areas_m2[comp_id - 1]
 
             sl = slices[comp_id - 1]
             if sl is None:

@@ -100,14 +100,24 @@ class Visualizer:
         底图采用夏季作物峰值 NDVI，叠加高亮的地块边界。
         """
         fig, ax = plt.subplots(figsize=(8, 7))
-        # 动态自适应获取全时段最大植被指数作为农田底图（兼容任意时相数量，杜绝固定索引越界）
-        if raster_cube_peak.ndim == 3:
+        # 动态自适应获取全时段最大植被指数作为农田底图（兼容任意时相数量、2D低内存缩略图或无底图场景）
+        if raster_cube_peak is None:
+            disp_parcels = downsample_raster_preview(parcel_id_mask, max_dim=1200)
+            disp_ndvi = (disp_parcels > 0).astype(np.float32) * 0.5 + 0.2
+        elif raster_cube_peak.ndim == 3:
             peak_ndvi = np.max(raster_cube_peak, axis=2)
+            disp_ndvi = downsample_raster_preview(peak_ndvi, max_dim=1200)
+            disp_parcels = downsample_raster_preview(parcel_id_mask, max_dim=1200)
         else:
-            peak_ndvi = raster_cube_peak
+            disp_ndvi = downsample_raster_preview(raster_cube_peak, max_dim=1200)
+            disp_parcels = downsample_raster_preview(parcel_id_mask, max_dim=1200)
 
-        disp_ndvi = downsample_raster_preview(peak_ndvi, max_dim=1200)
-        disp_parcels = downsample_raster_preview(parcel_id_mask, max_dim=1200)
+        # 确保底图与地块尺寸严格对齐（应对极少数降采样四舍五入微小像素差异）
+        if disp_ndvi.shape != disp_parcels.shape:
+            from scipy.ndimage import zoom
+            z_r = disp_parcels.shape[0] / max(disp_ndvi.shape[0], 1)
+            z_c = disp_parcels.shape[1] / max(disp_ndvi.shape[1], 1)
+            disp_ndvi = zoom(disp_ndvi, (z_r, z_c), order=1)
 
         ax.imshow(disp_ndvi, cmap="YlGn", vmin=0.1, vmax=0.9)
 

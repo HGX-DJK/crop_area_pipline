@@ -155,6 +155,38 @@ class RasterLoader:
                 except Exception:
                     pass
 
+    def load_preview_thumbnail(self, tif_dir_or_list, max_dim: int = 1200) -> np.ndarray:
+        """
+        以极低内存极速读取一景降采样缩略底图 (约 1200×1200，仅数兆内存)，
+        供成果专题图 (Matplotlib) 作为可视化农田背景底图，彻底避免大图 OOM。
+        """
+        if not HAS_RASTERIO:
+            return np.zeros((100, 100), dtype=np.float32)
+
+        sorted_files, _, _, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+        target_file = sorted_files[0]
+        with rasterio.open(target_file) as src:
+            step = max(1, max(src.height, src.width) // max_dim)
+            out_h = max(1, src.height // step)
+            out_w = max(1, src.width // step)
+            band_idx = (src.count // 2 + 1) if (is_multiband and src.count > 1) else 1
+            try:
+                from rasterio.enums import Resampling
+                thumbnail = src.read(band_idx, out_shape=(out_h, out_w), resampling=Resampling.bilinear).astype(np.float32)
+            except Exception:
+                thumbnail = src.read(band_idx, out_shape=(out_h, out_w)).astype(np.float32)
+
+            if src.nodata is not None:
+                thumbnail[thumbnail == src.nodata] = np.nan
+
+            valid = np.isfinite(thumbnail)
+            if np.any(valid):
+                vmin = float(np.percentile(thumbnail[valid], 2))
+                vmax = float(np.percentile(thumbnail[valid], 98))
+                if vmax > vmin:
+                    thumbnail = np.clip((thumbnail - vmin) / (vmax - vmin), 0.0, 1.0)
+            return thumbnail
+
     def load_multitemporal_tifs(self, tif_dir_or_list):
         """
         从指定目录中读取多时相 GeoTIFF 影像，并按日历日（DOY）自动排序堆叠。
@@ -162,9 +194,17 @@ class RasterLoader:
         """
         sorted_files, geo_info, doy_list, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
 
+        h, w = geo_info["height"], geo_info["width"]
+        total_t = len(doy_list)
+        estimated_mem_gb = (h * w * total_t * 4) / (1024 ** 3)
+        if estimated_mem_gb > 2.0:
+            self.logger.warning(f"⚠️ 当前影像全量展开需要约 {estimated_mem_gb:.1f} GB 连续内存。对于超大影像，建议优先启用滑动窗口外核流式推断！")
+
         self.logger.info(f"检索到 {len(sorted_files)} 景多时相遥感影像，正在解析时相与空间信息...")
 
-        band_arrays = []
+        # 就地预分配三维立方体，避免通过列表累积再使用 np.stack 导致的双倍内存峰值
+        raster_cube = np.empty((h, w, total_t), dtype=np.float32)
+
         if is_multiband and len(sorted_files) == 1:
             with rasterio.open(sorted_files[0]) as src:
                 self.logger.info(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")
@@ -172,17 +212,15 @@ class RasterLoader:
                     arr = src.read(b).astype(np.float32)
                     if src.nodata is not None:
                         arr[arr == src.nodata] = np.nan
-                    band_arrays.append(arr)
+                    raster_cube[:, :, b - 1] = arr
         else:
-            for tif_path in sorted_files:
+            for idx, tif_path in enumerate(sorted_files):
                 with rasterio.open(tif_path) as src:
                     arr = src.read(1).astype(np.float32)
                     if src.nodata is not None:
                         arr[arr == src.nodata] = np.nan
-                    band_arrays.append(arr)
+                    raster_cube[:, :, idx] = arr
 
-        # 堆叠为三维立方体 (Rows, Cols, T)
-        raster_cube = np.stack(band_arrays, axis=-1)
         res_desc = f"{geo_info['resolution_x']:.5f} 度 (约 {geo_info['resolution_meters']:.1f} 米)" if geo_info.get("is_geographic") else f"{geo_info['resolution_x']:.2f} 米"
         log_success(self.logger, f"影像堆叠完成，空间尺寸: {geo_info['height']} 行 × {geo_info['width']} 列，覆盖 {len(doy_list)} 个生长时相 (CRS: {geo_info['crs']}，空间分辨率: {res_desc})")
 

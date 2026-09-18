@@ -56,7 +56,12 @@ class AreaUnbiasedEstimator:
             若 return_details=True:  (df_report, cond_matrix, df_confusion_matrix, accuracy_metrics)
         """
         # 1. 计算全域地图的朴素像元面积 (Naive Area) 与分层权重 (Wi)
-        unique_classes, pixel_counts = np.unique(crop_classified_mask, return_counts=True)
+        if np.issubdtype(crop_classified_mask.dtype, np.integer):
+            counts = np.bincount(crop_classified_mask.ravel())
+            unique_classes = np.nonzero(counts)[0]
+            pixel_counts = counts[unique_classes]
+        else:
+            unique_classes, pixel_counts = np.unique(crop_classified_mask, return_counts=True)
         total_pixels = float(crop_classified_mask.size)
         total_area_m2 = total_pixels * self.pixel_area_m2
         map_pixel_dict = dict(zip(unique_classes, pixel_counts))

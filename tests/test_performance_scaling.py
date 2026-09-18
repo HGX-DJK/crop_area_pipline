@@ -190,6 +190,59 @@ class TestPerformanceScaling(unittest.TestCase):
                 # 几何坐标环必须严格相等
                 self.assertEqual(feat_s["geometry"]["coordinates"], feat_p["geometry"]["coordinates"])
 
+    def test_geotiff_out_of_core_streaming(self):
+        """验证 GeoTIFF 纯外核磁盘流式推断与轻量缩略底图功能"""
+        try:
+            import rasterio
+            from rasterio.transform import from_origin
+        except ImportError:
+            self.skipTest("rasterio 未安装，跳过 GeoTIFF 外核流式测试")
+
+        from src.raster_loader import RasterLoader
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tif_path = os.path.join(tmpdir, "test_multiband.tif")
+            h, w, bands = 64, 64, 4
+            transform = from_origin(500000, 4200000, 10, 10)
+            data = np.random.rand(bands, h, w).astype(np.float32)
+            with rasterio.open(
+                tif_path, "w",
+                driver="GTiff",
+                height=h,
+                width=w,
+                count=bands,
+                dtype="float32",
+                crs="EPSG:32650",
+                transform=transform
+            ) as dst:
+                dst.write(data)
+
+            loader = RasterLoader(self.config)
+            sorted_files, geo_info, doy_list, is_multiband = loader.get_multitemporal_metadata(tif_path)
+            self.assertEqual(geo_info["height"], 64)
+            self.assertEqual(geo_info["width"], 64)
+            self.assertTrue(is_multiband)
+            self.assertEqual(len(doy_list), 4)
+
+            # 测试低内存缩略底图
+            thumbnail = loader.load_preview_thumbnail(tif_path, max_dim=32)
+            self.assertLessEqual(max(thumbnail.shape), 32)
+
+            # 测试流式推断
+            ts_builder = TimeSeriesBuilder(self.config)
+            classifier = CropClassifier(self.config)
+            classifier.train_with_samples(
+                "data/sample_training_points.csv",
+                ts_builder=ts_builder,
+                target_t=4,
+                doy_list=doy_list
+            )
+            mask, conf, _, _ = classifier.predict_geotiff_stream(
+                loader, sorted_files, ts_builder, block_size=32
+            )
+            self.assertEqual(mask.shape, (64, 64))
+            self.assertEqual(conf.shape, (64, 64))
+            self.assertEqual(mask.dtype, np.uint8)
+
 
 if __name__ == "__main__":
     unittest.main()

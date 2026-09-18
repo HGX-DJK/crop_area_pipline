@@ -70,48 +70,80 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     input_mode = config.get("input_source", {}).get("mode", "synthetic")
     geo_info = None
     doy_list = None
+    preview_cube = None
+
+    perf_cfg = config.get("performance", {})
+    block_size = perf_cfg.get("streaming_block_size", 1024)
+    force_streaming = perf_cfg.get("enable_window_streaming", False)
 
     if input_mode == "geotiff":
         geotiff_dir = config.get("input_source", {}).get("geotiff_dir", "data/satellite_tifs")
-        logger.info(f"[步骤 1/5] 读取本地多时相真实遥感 GeoTIFF 影像切片 ({geotiff_dir})...")
+        logger.info(f"[步骤 1/5] 解析本地多时相真实遥感 GeoTIFF 空间坐标与时相序列 ({geotiff_dir})...")
         loader = RasterLoader(config)
-        raster_cube, geo_info, doy_list = loader.load_multitemporal_tifs(geotiff_dir)
+        sorted_files, geo_info, doy_list, is_multiband = loader.get_multitemporal_metadata(geotiff_dir)
 
         if geo_info is not None:
             spatial_res = geo_info.get("resolution_meters", 10.0)
             config.setdefault("spatial", {})["resolution_meters"] = spatial_res
             if "crs" in geo_info:
                 config.setdefault("spatial", {})["crs"] = geo_info["crs"]
-            logger.info(f"  -> 自动对齐影像地面物理分辨率: {spatial_res:.2f} 米/像元。")
+            res_desc = f"{geo_info['resolution_x']:.5f} 度 (约 {spatial_res:.1f} 米)" if geo_info.get("is_geographic") else f"{spatial_res:.2f} 米"
+            logger.info(f"  -> 自动对齐影像空间参考 (CRS: {geo_info['crs']}，空间分辨率: {res_desc})，尺寸: {geo_info['height']} 行 × {geo_info['width']} 列，覆盖 {len(doy_list)} 个生长时相。")
+
+        total_pixels = geo_info["height"] * geo_info["width"]
+        use_streaming = force_streaming or (total_pixels > 4000000)
+
+        # 3. 训练作物分类器并全域推断
+        logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
+        classifier = CropClassifier(config)
+
+        classifier.train_with_samples(
+            config.get("paths", {}).get("training_samples", "data/sample_training_points.csv"),
+            ts_builder=ts_builder,
+            target_t=len(doy_list),
+            doy_list=doy_list
+        )
+
+        if use_streaming:
+            logger.info(f"  -> 影像像元规模达 {total_pixels:,} (超 400 万) 或开启流式，自动启用磁盘纯外核滑动窗口流式推断 (块大小: {block_size}×{block_size})，避免大图内存峰值...")
+            crop_mask, conf_map, geo_info, doy_list = classifier.predict_geotiff_stream(
+                loader, sorted_files, ts_builder, block_size=block_size
+            )
+            # 以极低内存提取一张缩略底图 (约 1200×1200，仅数兆)，供成果专题图制图底图使用
+            preview_cube = loader.load_preview_thumbnail(sorted_files, max_dim=1200)
+        else:
+            logger.info("  -> 影像规模适中，载入全图三维矩阵推断...")
+            raster_cube, geo_info, doy_list = loader.load_multitemporal_tifs(geotiff_dir)
+            feature_cube = ts_builder.extract_phenological_features(raster_cube)
+            crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
+            preview_cube = raster_cube
+            logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
     else:
         logger.info("[步骤 1/5] 构建多时相卫星时序立方体与提取作物物候指纹 (基准仿真模式)...")
         # 生成/加载标准测试场景 (120x120 像素，包含零碎农田、1~2像素窄田埂与背景地物)
         landscape = ts_builder.generate_synthetic_agricultural_landscape(rows=120, cols=120)
         raster_cube = landscape["raster_cube"]  # (Rows, Cols, 8个时相)
+        preview_cube = raster_cube
 
-    # 3. 训练作物分类器并全域推断
-    logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
-    classifier = CropClassifier(config)
+        # 3. 训练作物分类器并全域推断
+        logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
+        classifier = CropClassifier(config)
 
-    classifier.train_with_samples(
-        config.get("paths", {}).get("training_samples", "data/sample_training_points.csv"),
-        ts_builder=ts_builder,
-        target_t=raster_cube.shape[2],
-        doy_list=doy_list if input_mode == "geotiff" else ts_builder.doy_list
-    )
+        classifier.train_with_samples(
+            config.get("paths", {}).get("training_samples", "data/sample_training_points.csv"),
+            ts_builder=ts_builder,
+            target_t=raster_cube.shape[2],
+            doy_list=ts_builder.doy_list
+        )
 
-    perf_cfg = config.get("performance", {})
-    block_size = perf_cfg.get("streaming_block_size", 1024)
-    force_streaming = perf_cfg.get("enable_window_streaming", False)
-    total_pixels = raster_cube.shape[0] * raster_cube.shape[1]
-
-    if force_streaming or total_pixels > 4000000:
-        logger.info(f"  -> 启用滑动窗口流式推断 (块大小: {block_size}×{block_size})，避免大图内存峰值...")
-        crop_mask, conf_map = classifier.predict_cube_stream(raster_cube, ts_builder, block_size=block_size)
-    else:
-        feature_cube = ts_builder.extract_phenological_features(raster_cube)
-        crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
-        logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
+        total_pixels = raster_cube.shape[0] * raster_cube.shape[1]
+        if force_streaming or total_pixels > 4000000:
+            logger.info(f"  -> 启用滑动窗口流式推断 (块大小: {block_size}×{block_size})，避免大图内存峰值...")
+            crop_mask, conf_map = classifier.predict_cube_stream(raster_cube, ts_builder, block_size=block_size)
+        else:
+            feature_cube = ts_builder.extract_phenological_features(raster_cube)
+            crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
+            logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
     logger.info("[步骤 3/5] 执行形态学边缘腐蚀与狭窄田埂切分（切分零碎小田块）...")
@@ -181,7 +213,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         viz = Visualizer(config)
         p1 = viz.plot_phenology_curves(config.get("paths", {}).get("phenology_curves", "data/sample_phenology_curves.csv"))
         p2 = viz.plot_crop_classification_map(crop_mask)
-        p3 = viz.plot_parcel_delineation(parcel_id_mask, raster_cube)
+        p3 = viz.plot_parcel_delineation(parcel_id_mask, preview_cube)
         p4 = viz.plot_area_comparison(df_area_report)
         log_success(logger, f"已在 '{output_dir}/' 目录下生成 4 幅出版级高清成果图: {os.path.basename(p1)}, {os.path.basename(p2)}, {os.path.basename(p3)}, {os.path.basename(p4)}")
 
