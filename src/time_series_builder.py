@@ -6,6 +6,7 @@
 3. 生成支持算法校验的标准测试栅格立方体（模拟零碎农田、狭窄田埂与背景地物）
 """
 
+import os
 import numpy as np
 import pandas as pd
 

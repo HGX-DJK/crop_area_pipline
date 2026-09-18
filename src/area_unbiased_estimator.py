@@ -15,6 +15,7 @@
 5. 预测增强推断（PPI / PTD）拓展单产与连续变量去偏推断
 """
 
+import os
 import numpy as np
 import pandas as pd
 

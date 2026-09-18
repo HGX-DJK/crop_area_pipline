@@ -4,6 +4,7 @@
 输入多时相物候特征矩阵，输出全域农作物种植分类图与置信度概率图。
 """
 
+import os
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
