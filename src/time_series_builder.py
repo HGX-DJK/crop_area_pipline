@@ -157,6 +157,11 @@ class TimeSeriesBuilder:
         import os
         import pandas as pd
         pheno_csv = self.config.get("paths", {}).get("phenology_curves", "data/sample_phenology_curves.csv")
+        if not os.path.exists(pheno_csv) and not os.path.isabs(pheno_csv):
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cand = os.path.join(project_root, pheno_csv)
+            if os.path.exists(cand):
+                pheno_csv = cand
         pheno_curves = {}
         if os.path.exists(pheno_csv):
             df_p = pd.read_csv(pheno_csv, comment="#")

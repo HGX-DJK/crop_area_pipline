@@ -33,9 +33,29 @@ from src.utils.logger import validate_config, get_logger, log_success
 def load_config(config_path="config.yaml"):
     logger = get_logger("配置检查")
     if not os.path.exists(config_path):
-        raise FileNotFoundError(f"未找到配置文件: {config_path}")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        alt_path = os.path.join(script_dir, config_path)
+        if os.path.exists(alt_path):
+            config_path = alt_path
+        else:
+            raise FileNotFoundError(f"未找到配置文件: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    # 规范化并解析所有相对路径为相对于项目根目录 (config 文件所在目录)
+    base_dir = os.path.dirname(os.path.abspath(config_path))
+    def _resolve(p):
+        if p and isinstance(p, str) and not os.path.isabs(p):
+            return os.path.normpath(os.path.join(base_dir, p))
+        return p
+
+    if "paths" in cfg:
+        for k in ["data_dir", "output_dir", "training_samples", "phenology_curves", "ground_truth_samples"]:
+            if k in cfg["paths"]:
+                cfg["paths"][k] = _resolve(cfg["paths"][k])
+    if "input_source" in cfg and "geotiff_dir" in cfg["input_source"]:
+        cfg["input_source"]["geotiff_dir"] = _resolve(cfg["input_source"]["geotiff_dir"])
+
     is_valid, errors = validate_config(cfg)
     if not is_valid:
         for err in errors:

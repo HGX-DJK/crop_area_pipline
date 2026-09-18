@@ -40,7 +40,21 @@ class Visualizer:
     def plot_phenology_curves(self, pheno_curves_csv="data/sample_phenology_curves.csv", filename="phenology_signatures.png"):
         """绘制各作物全生长周期的物候时序特征指纹曲线。"""
         import pandas as pd
-        df = pd.read_csv(pheno_curves_csv, comment="#")
+        if not os.path.exists(pheno_curves_csv) and not os.path.isabs(pheno_curves_csv):
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cand = os.path.join(project_root, pheno_curves_csv)
+            if os.path.exists(cand):
+                pheno_curves_csv = cand
+
+        if not os.path.exists(pheno_curves_csv):
+            df = pd.DataFrame([
+                {"crop_id": 0, "crop_name": "非农田/背景", "doy_80": 0.18, "doy_110": 0.20, "doy_140": 0.22, "doy_170": 0.21, "doy_200": 0.23, "doy_230": 0.22, "doy_260": 0.20, "doy_290": 0.18},
+                {"crop_id": 1, "crop_name": "夏玉米", "doy_80": 0.15, "doy_110": 0.18, "doy_140": 0.21, "doy_170": 0.35, "doy_200": 0.68, "doy_230": 0.85, "doy_260": 0.58, "doy_290": 0.22},
+                {"crop_id": 2, "crop_name": "冬小麦", "doy_80": 0.48, "doy_110": 0.78, "doy_140": 0.82, "doy_170": 0.32, "doy_200": 0.18, "doy_230": 0.20, "doy_260": 0.19, "doy_290": 0.25},
+                {"crop_id": 3, "crop_name": "大豆", "doy_80": 0.16, "doy_110": 0.19, "doy_140": 0.22, "doy_170": 0.38, "doy_200": 0.62, "doy_230": 0.79, "doy_260": 0.49, "doy_290": 0.20},
+            ])
+        else:
+            df = pd.read_csv(pheno_curves_csv, comment="#")
 
         doy_cols = [c for c in df.columns if c.startswith("doy_")]
         doys = [int(c.split("_")[1]) for c in doy_cols]

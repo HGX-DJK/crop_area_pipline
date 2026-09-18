@@ -35,6 +35,11 @@ class RasterLoader:
     def resolve_tif_files(self, tif_dir_or_list):
         """解析并返回有效的 GeoTIFF 文件路径列表。"""
         if isinstance(tif_dir_or_list, str):
+            if not os.path.exists(tif_dir_or_list) and not os.path.isabs(tif_dir_or_list):
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                cand = os.path.join(project_root, tif_dir_or_list)
+                if os.path.exists(cand):
+                    tif_dir_or_list = cand
             if os.path.isdir(tif_dir_or_list):
                 tif_files = sorted(
                     glob.glob(os.path.join(tif_dir_or_list, "*.tif")) +
