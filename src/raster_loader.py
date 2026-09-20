@@ -94,11 +94,34 @@ class RasterLoader:
                 doy_list = [b * 30 for b in range(1, src.count + 1)]
                 return tif_files, geo_info, doy_list, is_multiband
 
-        # 多景文件解析各自时相 DOY
+        # 多景文件检验地理空间范围一致性与解析各自时相 DOY
+        base_bounds = geo_info.get("bounds")
+        spatial_mismatch_files = []
         for idx, tif_path in enumerate(tif_files):
             fname = os.path.basename(tif_path)
             doy = parse_temporal_doy(fname, default_doy=(idx + 1) * 30)
             doy_list.append(doy)
+
+            if idx > 0 and base_bounds is not None:
+                try:
+                    with rasterio.open(tif_path) as s:
+                        cur_b = s.bounds
+                        # 检查空间范围是否明显错位 (经纬度差 > 0.1度 或 投影米制差 > 1000米)
+                        tol = 0.1 if geo_info.get("is_geographic") else 1000.0
+                        if (abs(cur_b.left - base_bounds.left) > tol or 
+                            abs(cur_b.bottom - base_bounds.bottom) > tol):
+                            spatial_mismatch_files.append(fname)
+                except Exception:
+                    pass
+
+        if spatial_mismatch_files:
+            self.logger.warning(
+                f"⚠️ [遥感数据严重提示] 检测到输入目录中的多个 GeoTIFF 地理空间范围不一致！\n"
+                f"  首景参照基准: {os.path.basename(tif_files[0])} (Bounds: {base_bounds})\n"
+                f"  错位瓦片示例: {spatial_mismatch_files[:3]}\n"
+                f"  【根因分析】这些文件是不同地理区域的空间切片瓦片 (Spatial Tiles)，而非同一区域的多时相时间序列！\n"
+                f"  将不同区域的空间大图强行按时序上下堆叠，会导致严重的物候错乱与错误分类。"
+            )
 
         sorted_order = np.argsort(doy_list)
         sorted_tif_files = [tif_files[i] for i in sorted_order]
