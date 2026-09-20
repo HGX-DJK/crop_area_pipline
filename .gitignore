@@ -88,3 +88,7 @@ htmlcov/
 .mypy_cache/
 .tox/
 src/__pycache__/
+
+
+#  --- output输出内容
+output/

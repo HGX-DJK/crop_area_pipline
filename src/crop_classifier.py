@@ -5,6 +5,8 @@
 """
 
 import os
+import sys
+import time
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -147,18 +149,32 @@ class CropClassifier:
         np.random.seed(self.random_state)
         doys = [80, 110, 140, 170, 200, 230, 260, 290]
         base_curves = {
-            0: [0.18, 0.20, 0.22, 0.21, 0.23, 0.22, 0.20, 0.18],  # 背景
-            1: [0.15, 0.18, 0.21, 0.35, 0.68, 0.85, 0.58, 0.22],  # 夏玉米
+            0: [0.18, 0.20, 0.22, 0.21, 0.23, 0.22, 0.20, 0.18],  # 背景 (土壤/地表)
+            1: [0.20, 0.25, 0.35, 0.68, 0.85, 0.65, 0.30, 0.20],  # 夏玉米
             2: [0.48, 0.78, 0.82, 0.32, 0.18, 0.20, 0.19, 0.25],  # 冬小麦
-            3: [0.16, 0.19, 0.22, 0.38, 0.62, 0.79, 0.49, 0.20],  # 大豆
+            3: [0.20, 0.24, 0.38, 0.62, 0.79, 0.55, 0.28, 0.20],  # 大豆
+            4: [0.15, 0.12, 0.45, 0.76, 0.84, 0.62, 0.25, 0.18],  # 水稻 (具有泡田期低值指纹)
+            5: [0.68, 0.52, 0.35, 0.20, 0.22, 0.21, 0.22, 0.30],  # 冬油菜
+            6: [0.18, 0.22, 0.35, 0.65, 0.80, 0.55, 0.25, 0.20],  # 棉花
+            7: [0.18, 0.22, 0.36, 0.65, 0.78, 0.52, 0.24, 0.20],  # 花生
+            8: [0.20, 0.25, 0.45, 0.75, 0.80, 0.50, 0.25, 0.20],  # 马铃薯
+            9: [0.35, 0.45, 0.60, 0.75, 0.80, 0.75, 0.60, 0.45],  # 甘蔗
+            10: [0.20, 0.30, 0.50, 0.75, 0.78, 0.50, 0.28, 0.20], # 甜菜
+            11: [0.45, 0.48, 0.46, 0.47, 0.45, 0.48, 0.46, 0.45], # 设施大棚
+            12: [0.65, 0.68, 0.70, 0.72, 0.70, 0.68, 0.65, 0.62], # 果园茶园
         }
         records = []
         p_idx = 1
         for cid, cname in self.crop_legend.items():
             base = base_curves.get(cid, base_curves[0])
-            for _ in range(n_per_class):
-                noise = np.random.normal(0.0, 0.02, size=len(doys))
-                ts_sample = np.clip(np.array(base) + noise, 0.05, 0.95)
+            for k in range(n_per_class):
+                # 类别 0 特别注入 50% 水体/大洋/阴影样本 (NDVI <= 0.05) 与 50% 裸地样本
+                if cid == 0 and k < (n_per_class // 2):
+                    water_val = np.random.uniform(-0.05, 0.05)
+                    ts_sample = np.clip(np.zeros(len(doys)) + water_val + np.random.normal(0, 0.01, size=len(doys)), -0.2, 0.10)
+                else:
+                    noise = np.random.normal(0.0, 0.02, size=len(doys))
+                    ts_sample = np.clip(np.array(base) + noise, 0.05, 0.95)
                 row = {
                     "point_id": f"P{p_idx:04d}",
                     "label": int(cid),
@@ -189,26 +205,37 @@ class CropClassifier:
 
         # 识别有效像元与无效像元 (如 NoData / NaN / Inf)，彻底避免 sklearn predict 报错
         valid_mask = np.isfinite(X_flat).all(axis=1)
-        valid_count = int(np.sum(valid_mask))
+
+        # 遥感物理学植被硬阈值过滤 (Vegetation Physical Barrier):
+        # 农作物在生长旺季 NDVI 必然 >= 0.18；海洋、水体、裸岩与阴影像元 (NDVI <= 0.15)
+        # 在物理上绝不可能为健康农作物，直接锁定为背景 0，置信度设为 1.0。
+        # 这一步彻底根绝了大洋/水体像元 (NDVI<=0.0) 被外推决策树误判为大片玉米的物理缺陷，并使大洋海面推断极速跳过。
+        raw_val = X_flat[:, 0]
+        max_val = X_flat[:, 1] if f > 1 else raw_val
+        veg_mask = (max_val >= 0.18)
+
+        predict_mask = valid_mask & veg_mask
+        predict_count = int(np.sum(predict_mask))
 
         preds_flat = np.zeros(total_pixels, dtype=np.int32)
-        max_probs = np.zeros(total_pixels, dtype=np.float32)
+        # 对非植被/水体海洋像元，默认赋予 1.0 置信度（高度确信是非农田背景）
+        max_probs = np.ones(total_pixels, dtype=np.float32)
 
-        if valid_count > 0:
-            valid_indices = np.where(valid_mask)[0]
-            X_valid = X_flat[valid_indices]
+        if predict_count > 0:
+            predict_indices = np.where(predict_mask)[0]
+            X_predict = X_flat[predict_indices]
 
-            # 针对有效像元执行分批流式推断 (基于 predict_proba 单次遍历树模型，推理速度提升近一倍)
+            # 针对真实具备植被特征的候选农田像元执行流式推断
             classes_arr = np.array(self.model.classes_)
-            if valid_count <= batch_size:
-                probs_valid = self.model.predict_proba(X_valid)
-                preds_flat[valid_indices] = classes_arr[np.argmax(probs_valid, axis=1)]
-                max_probs[valid_indices] = np.max(probs_valid, axis=1)
+            if predict_count <= batch_size:
+                probs_valid = self.model.predict_proba(X_predict)
+                preds_flat[predict_indices] = classes_arr[np.argmax(probs_valid, axis=1)]
+                max_probs[predict_indices] = np.max(probs_valid, axis=1)
             else:
-                for start_idx in range(0, valid_count, batch_size):
-                    end_idx = min(start_idx + batch_size, valid_count)
-                    chunk_X = X_valid[start_idx:end_idx]
-                    chunk_indices = valid_indices[start_idx:end_idx]
+                for start_idx in range(0, predict_count, batch_size):
+                    end_idx = min(start_idx + batch_size, predict_count)
+                    chunk_X = X_predict[start_idx:end_idx]
+                    chunk_indices = predict_indices[start_idx:end_idx]
 
                     chunk_prob = self.model.predict_proba(chunk_X)
                     preds_flat[chunk_indices] = classes_arr[np.argmax(chunk_prob, axis=1)]
@@ -281,16 +308,28 @@ class CropClassifier:
         self.logger.info(f"开启磁盘 GeoTIFF 纯外核流式推断引擎 (全景: {h}×{w}, 分块: {total_blocks}个, 块大小: {block_size}×{block_size}, 掩膜存储: {mask_dtype.__name__})...")
 
         blk_idx = 0
+        t_start = time.time()
+        last_log_time = t_start
+
         for (r_slice, c_slice), win_cube in raster_loader.iter_raster_windows(sorted_files, block_size=block_size, is_multiband=is_multiband):
             blk_idx += 1
             win_feats = ts_builder.extract_phenological_features(win_cube)
-            win_mask, win_conf = self.predict_raster_cube(win_feats)
+            # 单块 1024x1024 (约104万像素) 整体并行推断，消除子批次频繁启动线程池开销
+            win_mask, win_conf = self.predict_raster_cube(win_feats, batch_size=1100000)
             crop_mask[r_slice, c_slice] = win_mask
             conf_map[r_slice, c_slice] = win_conf
 
-            if blk_idx % 10 == 0 or blk_idx == total_blocks:
+            now = time.time()
+            # 每 2 块、首末块、或时间超过 5 秒即时刷新进度，带当前速度与预计剩余时间
+            if blk_idx == 1 or blk_idx % 2 == 0 or blk_idx == total_blocks or (now - last_log_time >= 5.0):
+                last_log_time = now
+                elapsed = now - t_start
+                avg_blk_sec = elapsed / max(blk_idx, 1)
+                remaining_sec = (total_blocks - blk_idx) * avg_blk_sec
+                rem_m, rem_s = divmod(int(remaining_sec), 60)
                 pct = (blk_idx / max(total_blocks, 1)) * 100.0
-                self.logger.info(f"  -> 流式推断进度: {blk_idx}/{total_blocks} 块 ({pct:.1f}%)...")
+                self.logger.info(f"  -> 流式推断进度: {blk_idx}/{total_blocks} 块 ({pct:4.1f}%) | 耗时: {avg_blk_sec:.1f}s/块 | 预计剩余: {rem_m}分{rem_s:02d}秒")
+                sys.stdout.flush()
 
-        log_success(self.logger, f"磁盘 GeoTIFF 分块流式预测完成 (共 {total_blocks} 块)，平均置信度: {float(np.mean(conf_map)) * 100:.1f}%。")
+        log_success(self.logger, f"磁盘 GeoTIFF 分块流式预测完成 (共 {total_blocks} 块，总耗时: {(time.time()-t_start):.1f}s)，平均置信度: {float(np.mean(conf_map)) * 100:.1f}%。")
         return crop_mask, conf_map, geo_info, doy_list
