@@ -15,6 +15,7 @@ from src.utils.geo_utils import (
     parse_temporal_doy,
     is_geographic_system,
     estimate_resolution_meters,
+    parse_utm_zone,
 )
 from src.utils.logger import get_logger, log_success
 
@@ -75,8 +76,11 @@ class RasterLoader:
             res_y = abs(src.transform[4])
             res_meters = estimate_resolution_meters(res_x, is_geographic=is_geo)
 
+            crs_str = str(src.crs) if src.crs else self.spatial_cfg.get("crs", "EPSG:32650")
+            parsed_zone, parsed_northern = parse_utm_zone(crs_str, default_zone=self.spatial_cfg.get("utm_zone", 50))
+
             geo_info = {
-                "crs": str(src.crs) if src.crs else self.spatial_cfg.get("crs", "EPSG:32650"),
+                "crs": crs_str,
                 "transform": src.transform,
                 "bounds": src.bounds,
                 "width": src.width,
@@ -85,6 +89,8 @@ class RasterLoader:
                 "resolution_y": res_y,
                 "resolution_meters": res_meters,
                 "is_geographic": is_geo,
+                "utm_zone": parsed_zone,
+                "northern": parsed_northern,
                 "nodata": src.nodata,
                 "count": src.count
             }

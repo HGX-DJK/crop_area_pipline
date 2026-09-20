@@ -123,26 +123,81 @@ def wgs84_to_utm(lon, lat, zone=50):
     return round(float(easting), 2), round(float(northing), 2)
 
 
-def is_geographic_system(crs_or_info):
+def is_geographic_system(crs_or_info) -> bool:
     """
     严谨判断输入 CRS 或 geo_info 是否为地理经纬度坐标系（度），而非投影平面直角坐标系（米）。
     支持 EPSG:4326, CGCS2000, WGS 84, OGC:CRS84 及各类 WKT 声明。
+    特别防御：UTM 等米制投影系统因描述中包含基准面 'WGS 84' 而被误判为经纬度。
     """
     if isinstance(crs_or_info, dict):
-        if crs_or_info.get("is_geographic", False):
-            return True
+        if "is_geographic" in crs_or_info:
+            return bool(crs_or_info["is_geographic"])
         crs_str = str(crs_or_info.get("crs", "")).upper()
     elif crs_or_info is not None:
         crs_str = str(crs_or_info).upper()
     else:
         return False
 
+    # 优先识别投影坐标系统特征 (Projected Coordinate System)
+    # 凡以 PROJCS / PROJCRS 开头或包含 UTM、TRANSVERSE_MERCATOR 的均为米制投影坐标，绝非经纬度
+    proj_signatures = [
+        "PROJCS", "PROJCRS", "PROJECTED", "UTM", "TRANSVERSE_MERCATOR",
+        "LAMBERT", "ALBERS", "MERCATOR", "GAUSS_KRUGER", "POLAR_STEREOGRAPHIC"
+    ]
+    if any(sig in crs_str for sig in proj_signatures):
+        return False
+
     clean = crs_str.replace(" ", "").replace("_", "").replace("-", "")
     geo_signatures = [
-        "4326", "4490", "WGS84", "CRS84", "CGCS2000", "GCS", "GEOGCS", "GEOGCRS",
-        "DEGREE", "LONGITUDE", "LATITUDE", "EPSG:4326", "OGC:CRS84"
+        "4326", "4490", "CRS84", "CGCS2000", "GCS", "GEOGCS", "GEOGCRS",
+        "DEGREE", "LONGITUDE", "LATITUDE", "EPSG:4326", "OGC:CRS84", "WGS84"
     ]
     return any(sig in clean or sig in crs_str for sig in geo_signatures)
+
+
+def parse_utm_zone(crs_or_info, default_zone: int = 50) -> tuple:
+    """
+    从坐标系描述或元数据中自适应解析 UTM 分带号 (1~60) 与南北半球标志 (True=北半球, False=南半球)。
+    支持格式：
+    - 'EPSG:32610' -> (10, True)
+    - 'EPSG:32710' -> (10, False)
+    - 'PROJCS["WGS 84 / UTM zone 10N", ...]' -> (10, True)
+    - 'UTM Zone 50S' -> (50, False)
+    """
+    if isinstance(crs_or_info, dict):
+        if "utm_zone" in crs_or_info and crs_or_info["utm_zone"]:
+            return int(crs_or_info["utm_zone"]), bool(crs_or_info.get("northern", True))
+        crs_str = str(crs_or_info.get("crs", ""))
+    elif crs_or_info is not None:
+        crs_str = str(crs_or_info)
+    else:
+        return default_zone, True
+
+    # 1. 匹配 EPSG 326xx (北半球) 与 327xx (南半球)
+    epsg_north = re.search(r"326(\d{2})", crs_str)
+    if epsg_north:
+        return int(epsg_north.group(1)), True
+    epsg_south = re.search(r"327(\d{2})", crs_str)
+    if epsg_south:
+        return int(epsg_south.group(1)), False
+
+    # 2. 匹配 "UTM zone 10N" 或 "UTM zone 10S" 或 "UTM Zone 10"
+    utm_match = re.search(r"UTM\s*(?:ZONE)?\s*(\d{1,2})\s*([NSns])?", crs_str, re.IGNORECASE)
+    if utm_match:
+        zone = int(utm_match.group(1))
+        hemi = utm_match.group(2)
+        northern = False if (hemi and hemi.upper() == 'S') else True
+        return zone, northern
+
+    # 3. 匹配通用 "zone 10N"
+    zone_match = re.search(r"zone\s*(\d{1,2})\s*([NSns])?", crs_str, re.IGNORECASE)
+    if zone_match:
+        zone = int(zone_match.group(1))
+        hemi = zone_match.group(2)
+        northern = False if (hemi and hemi.upper() == 'S') else True
+        return zone, northern
+
+    return default_zone, True
 
 
 def estimate_resolution_meters(res_x, is_geographic=False):

@@ -289,7 +289,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         print(f"📑 官方高管决策分析专报: {briefing_html} (一键打印/导出PDF)")
     prov_csv_path = os.path.join(output_dir, "vectorized_parcels_province_summary.csv")
     if os.path.exists(prov_csv_path):
-        print(f"📋 全国各省冬小麦统计台账: {prov_csv_path}")
+        print(f"📋 空间分省/区域农作物统计台账: {prov_csv_path}")
     print(f"✨ 联合国加权样框算法成功校正了小田块田埂像元混淆产生的系统性偏差！")
     print("=" * 86)
     print("🎉 种植区域提取与零碎地块矢量化流水线全部运行完毕！\n")

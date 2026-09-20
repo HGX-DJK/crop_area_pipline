@@ -166,15 +166,15 @@ class ExecutiveReportGenerator:
             row = df_acreage[df_acreage["crop_name"] == user_focus].iloc[0]
             return user_focus, row
 
-        # 优先检索冬小麦
-        if "冬小麦" in df_acreage["crop_name"].values:
-            row = df_acreage[df_acreage["crop_name"] == "冬小麦"].iloc[0]
-            return "冬小麦", row
+        # 自适应选取校准面积最大的优势作物作为专报核心呈报对象
+        sort_col = "unbiased_calibrated_mu" if "unbiased_calibrated_mu" in df_acreage.columns else "naive_area_mu"
+        if sort_col in df_acreage.columns:
+            sorted_df = df_acreage.sort_values(by=sort_col, ascending=False)
+            row = sorted_df.iloc[0]
+            return str(row["crop_name"]), row
 
-        # 否则选取无偏面积最大的优势作物
-        sort_col = "unbiased_calibrated_mu" if "unbiased_calibrated_mu" in df_acreage.columns else df_acreage.columns[1]
-        sorted_df = df_acreage.sort_values(by=sort_col, ascending=False)
-        row = sorted_df.iloc[0]
+        # 回退到首行
+        row = df_acreage.iloc[0]
         return str(row["crop_name"]), row
 
     def _render_kpi_cards(self, df_acreage: pd.DataFrame, focus_name: str, focus_row: pd.Series, total_parcel_mu: float, total_parcels: int) -> str:

@@ -35,7 +35,7 @@ except ImportError:
 # ============================================================================
 # 底层通用空间投影与几何算法工具导入（同时对外再导出以保持 100% 向后兼容）
 # ============================================================================
-from src.utils.geo_utils import utm_to_wgs84, wgs84_to_utm, is_geographic_system
+from src.utils.geo_utils import utm_to_wgs84, wgs84_to_utm, is_geographic_system, parse_utm_zone
 from src.utils.geometry_utils import (
     trace_grid_boundary as _trace_grid_boundary,
     simplify_polygon as _simplify_polygon,
@@ -71,13 +71,10 @@ def _pixel_to_coords_static(row: float, col: float, geo_transform: Optional[Tupl
 def _utm_to_wgs84_coords_static(utm_x: float, utm_y: float, is_geo: bool, target_crs: str, default_zone: int) -> Tuple[float, float]:
     """UTM 投影米制坐标转换为 WGS84 经纬度 (静态无状态版)"""
     fx, fy = float(utm_x), float(utm_y)
-    if is_geo or (abs(fx) <= 180.0 and abs(fy) <= 90.0):
+    if is_geo:
         return round(fx, 7), round(fy, 7)
-    zone = default_zone
-    match = re.search(r"326(\d{2})", target_crs)
-    if match:
-        zone = int(match.group(1))
-    lon, lat = utm_to_wgs84(fx, fy, zone=zone, northern=True)
+    zone, northern = parse_utm_zone(target_crs, default_zone=default_zone)
+    lon, lat = utm_to_wgs84(fx, fy, zone=zone, northern=northern)
     return round(float(lon), 7), round(float(lat), 7)
 
 
@@ -124,7 +121,9 @@ def _worker_process_single_parcel(task: dict) -> Optional[dict]:
         global_r = r + offset_r
         global_c = c + offset_c
         gx, gy = _pixel_to_coords_static(global_r, global_c, geo_transform, origin_x, origin_y, resolution)
-        if is_geo_input or (abs(float(gx)) <= 180.0 and abs(float(gy)) <= 90.0):
+        # 物理防御：经度绝对值绝不可超 180，纬度绝对值绝不可超 90
+        is_deg = is_geo_input and (abs(float(gx)) <= 180.0 and abs(float(gy)) <= 90.0)
+        if is_deg:
             lon = round(float(gx), 7)
             lat = round(float(gy), 7)
             zone = int((lon + 180) / 6) + 1 if (-180.0 <= lon <= 180.0) else utm_zone
@@ -154,7 +153,8 @@ def _worker_process_single_parcel(task: dict) -> Optional[dict]:
 
     # 质心坐标
     c_px, c_py = _pixel_to_coords_static(meta["centroid_row"], meta["centroid_col"], geo_transform, origin_x, origin_y, resolution)
-    if is_geo_input or (abs(float(c_px)) <= 180.0 and abs(float(c_py)) <= 90.0):
+    is_c_deg = is_geo_input and (abs(float(c_px)) <= 180.0 and abs(float(c_py)) <= 90.0)
+    if is_c_deg:
         c_lon = round(float(c_px), 7)
         c_lat = round(float(c_py), 7)
         c_zone = int((c_lon + 180) / 6) + 1 if (-180.0 <= c_lon <= 180.0) else utm_zone
@@ -251,26 +251,13 @@ class VectorExporter:
         自适应识别地理坐标系与数值范围，若本身已是经纬度则严格保真返回。
         """
         fx, fy = float(utm_x), float(utm_y)
-        # 若本身就是地理经纬度数值范围，直接返回
-        if is_geographic_system(geo_info) or (abs(fx) <= 180.0 and abs(fy) <= 90.0):
+        # 若本身就是地理经纬度数值范围且确定为地理坐标系，直接返回
+        if is_geographic_system(geo_info) and (abs(fx) <= 180.0 and abs(fy) <= 90.0):
             return round(fx, 7), round(fy, 7)
 
         target_crs = str(geo_info.get("crs", self.crs)) if geo_info else str(self.crs)
-
-        if self._transformer is not None:
-            try:
-                lon, lat = self._transformer.transform(fx, fy)
-                return round(float(lon), 7), round(float(lat), 7)
-            except Exception:
-                pass
-
-        # 动态解析 UTM 分带号（例如 EPSG:32650 -> 50分带）
-        zone = self.utm_zone
-        match = re.search(r"326(\d{2})", target_crs)
-        if match:
-            zone = int(match.group(1))
-
-        lon, lat = utm_to_wgs84(fx, fy, zone=zone, northern=True)
+        zone, northern = parse_utm_zone(geo_info or target_crs, default_zone=self.utm_zone)
+        lon, lat = utm_to_wgs84(fx, fy, zone=zone, northern=northern)
         return round(float(lon), 7), round(float(lat), 7)
 
     def _extract_parcel_geometry(self, binary_mask: np.ndarray, geo_info: Optional[Dict[str, Any]] = None, offset_r: int = 0, offset_c: int = 0):
@@ -310,7 +297,9 @@ class VectorExporter:
             global_r = r + offset_r
             global_c = c + offset_c
             gx, gy = self._pixel_to_coords(global_r, global_c, geo_info)
-            if is_geo_input or (abs(float(gx)) <= 180.0 and abs(float(gy)) <= 90.0):
+            # 物理防御：经度绝对值绝不可超 180，纬度绝对值绝不可超 90
+            is_deg = is_geo_input and (abs(float(gx)) <= 180.0 and abs(float(gy)) <= 90.0)
+            if is_deg:
                 # 栅格原生坐标即为地理经纬度 (如 WGS84 / CGCS2000)
                 lon = round(float(gx), 7)
                 lat = round(float(gy), 7)
@@ -353,6 +342,7 @@ class VectorExporter:
 
         is_wgs84 = (self.export_crs == "WGS84")
         is_geo_input = is_geographic_system(geo_info)
+        parsed_zone, parsed_northern = parse_utm_zone(geo_info, default_zone=self.utm_zone)
 
         # 预先计算各独立地块的最小外包矩形 (BBox)，按需局部裁剪切片后再追踪边界 (大幅加速 10~50 倍)
         slices = ndimage.find_objects(parcel_id_mask)
@@ -386,7 +376,8 @@ class VectorExporter:
                 "geo_transform": geo_transform,
                 "is_geo_input": is_geo_input,
                 "target_crs": str(geo_info.get("crs", self.crs)) if geo_info else str(self.crs),
-                "utm_zone": self.utm_zone,
+                "utm_zone": parsed_zone,
+                "northern": parsed_northern,
                 "origin_x": self.origin_x,
                 "origin_y": self.origin_y,
                 "resolution": self.resolution,
