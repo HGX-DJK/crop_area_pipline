@@ -101,9 +101,11 @@ class CropClassifier:
             else:
                 ts_values = raw_ts
 
+            self.target_t = target_t if target_t is not None else raw_ts.shape[1]
             X = ts_builder.extract_phenological_features(ts_values)
             feature_cols = [f"feat_{i+1}" for i in range(X.shape[1])]
         else:
+            self.target_t = None
             feature_cols = [c for c in df.columns if c not in ["point_id", "label", "crop_name"]]
             X = df[feature_cols].values
         
@@ -153,7 +155,7 @@ class CropClassifier:
             1: [0.20, 0.25, 0.35, 0.68, 0.85, 0.65, 0.30, 0.20],  # 夏玉米
             2: [0.48, 0.78, 0.82, 0.32, 0.18, 0.20, 0.19, 0.25],  # 冬小麦
             3: [0.20, 0.24, 0.38, 0.62, 0.79, 0.55, 0.28, 0.20],  # 大豆
-            4: [0.15, 0.12, 0.45, 0.76, 0.84, 0.62, 0.25, 0.18],  # 水稻 (具有泡田期低值指纹)
+            4: [0.15, 0.11, 0.42, 0.75, 0.84, 0.62, 0.25, 0.18],  # 水稻 (5月插秧泡田低值0.11，8月抽穗高峰0.84)
             5: [0.68, 0.52, 0.35, 0.20, 0.22, 0.21, 0.22, 0.30],  # 冬油菜
             6: [0.18, 0.22, 0.35, 0.65, 0.80, 0.55, 0.25, 0.20],  # 棉花
             7: [0.18, 0.22, 0.36, 0.65, 0.78, 0.52, 0.24, 0.20],  # 花生
@@ -210,8 +212,11 @@ class CropClassifier:
         # 农作物在生长旺季 NDVI 必然 >= 0.18；海洋、水体、裸岩与阴影像元 (NDVI <= 0.15)
         # 在物理上绝不可能为健康农作物，直接锁定为背景 0，置信度设为 1.0。
         # 这一步彻底根绝了大洋/水体像元 (NDVI<=0.0) 被外推决策树误判为大片玉米的物理缺陷，并使大洋海面推断极速跳过。
-        raw_val = X_flat[:, 0]
-        max_val = X_flat[:, 1] if f > 1 else raw_val
+        # 严密提取像元在整个观测时序中的最大 NDVI (峰值绿度)
+        t_obs = getattr(self, "target_t", None)
+        if t_obs is None or t_obs <= 0 or t_obs > f:
+            t_obs = max(1, f - 13) if f > 13 else (max(1, f - 10) if f > 10 else f)
+        max_val = np.max(X_flat[:, :t_obs], axis=1)
         veg_mask = (max_val >= 0.18)
 
         predict_mask = valid_mask & veg_mask

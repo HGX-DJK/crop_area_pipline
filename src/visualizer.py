@@ -54,6 +54,7 @@ class Visualizer:
                 {"crop_id": 1, "crop_name": "夏玉米", "doy_80": 0.15, "doy_110": 0.18, "doy_140": 0.21, "doy_170": 0.35, "doy_200": 0.68, "doy_230": 0.85, "doy_260": 0.58, "doy_290": 0.22},
                 {"crop_id": 2, "crop_name": "冬小麦", "doy_80": 0.48, "doy_110": 0.78, "doy_140": 0.82, "doy_170": 0.32, "doy_200": 0.18, "doy_230": 0.20, "doy_260": 0.19, "doy_290": 0.25},
                 {"crop_id": 3, "crop_name": "大豆", "doy_80": 0.16, "doy_110": 0.19, "doy_140": 0.22, "doy_170": 0.38, "doy_200": 0.62, "doy_230": 0.79, "doy_260": 0.49, "doy_290": 0.20},
+                {"crop_id": 4, "crop_name": "水稻", "doy_80": 0.15, "doy_110": 0.11, "doy_140": 0.42, "doy_170": 0.75, "doy_200": 0.84, "doy_230": 0.62, "doy_260": 0.25, "doy_290": 0.18},
             ])
         else:
             df = pd.read_csv(pheno_curves_csv, comment="#")
@@ -62,7 +63,7 @@ class Visualizer:
         doys = [int(c.split("_")[1]) for c in doy_cols]
 
         fig, ax = plt.subplots(figsize=(8, 5))
-        colors = ["#95a5a6", "#e67e22", "#27ae60", "#2980b9"]
+        colors = ["#95a5a6", "#e67e22", "#27ae60", "#2980b9", "#1abc9c", "#e74c3c", "#9b59b6", "#f1c40f"]
 
         for idx, row in df.iterrows():
             c_name = row["crop_name"]

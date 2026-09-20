@@ -127,7 +127,24 @@ class TimeSeriesBuilder:
             mid_slope = np.zeros_like(early_slope)
             late_drop = np.zeros_like(early_slope)
 
-        # 3. 组合全部特征向量：[原始全部时相NDVI, max, min, range, std, 动态梯度3维, 阶段斜率3维]
+        # 3. 针对水稻（Paddy Rice）的轻量水分与泡田期物候增强特征 (Flooding & Transplanting Signals)
+        # 水稻核心物理指纹：在生长前期（5-6月插秧期）存在蓄水泡田导致的光谱低谷（近水体吸收特征），
+        # 随后分蘖拔节期产生极陡峭跃升（拔节暴升）。旱地作物（玉米/大豆/棉花）在播种出苗期无泡田淹水陷阱。
+        if t >= 3:
+            early_bound = max(2, (t + 1) // 2)
+            early_min = np.min(ts[:, :early_bound], axis=1, keepdims=True)
+            # 特征 1：泡田期特征低值下陷深度 (Flooding Dip Depth)
+            paddy_flooding_dip = np.maximum(0.0, ts[:, [0]] - early_min)
+            # 特征 2：移栽后冠层爆发式跃变跨度 (Post-Transplanting Rebound Surge)
+            paddy_rebound_surge = ndvi_max - early_min
+            # 特征 3：水稻特征 V 形物候淹水指纹指数 (V-Transplanting Signal)
+            paddy_v_index = (paddy_flooding_dip / (ts[:, [0]] + 0.05)) * (paddy_rebound_surge / (ndvi_max + 0.05))
+        else:
+            paddy_flooding_dip = np.zeros_like(ndvi_max)
+            paddy_rebound_surge = np.zeros_like(ndvi_max)
+            paddy_v_index = np.zeros_like(ndvi_max)
+
+        # 4. 组合全部特征向量：[原始全部时相NDVI, max, min, range, std, 动态梯度3维, 阶段斜率3维, 水稻泡田水分3维]
         features = np.hstack([
             ts,
             ndvi_max,
@@ -139,12 +156,34 @@ class TimeSeriesBuilder:
             grad_mean,
             early_slope,
             mid_slope,
-            late_drop
+            late_drop,
+            paddy_flooding_dip,
+            paddy_rebound_surge,
+            paddy_v_index
         ])
 
         if is_3d:
             return features.reshape(h, w, -1)
         return features
+
+    @staticmethod
+    def compute_lswi(nir, swir):
+        """
+        计算地表水分指数 LSWI (Land Surface Water Index) = (NIR - SWIR) / (NIR + SWIR)
+        水稻移栽期 LSWI + 0.05 >= NDVI 是国际公认的水稻泡田淹水黄金判据 (Xiao et al., 2005)。
+        """
+        denom = nir + swir
+        denom = np.where(denom == 0, 1e-6, denom)
+        return (nir - swir) / denom
+
+    @staticmethod
+    def compute_ndwi(green, nir):
+        """
+        计算归一化水体指数 NDWI (Normalized Difference Water Index) = (Green - NIR) / (Green + NIR)
+        """
+        denom = green + nir
+        denom = np.where(denom == 0, 1e-6, denom)
+        return (green - nir) / denom
 
     def generate_synthetic_agricultural_landscape(self, rows=120, cols=120, random_seed=42):
         """
@@ -187,6 +226,7 @@ class TimeSeriesBuilder:
                 1: np.array([0.15, 0.18, 0.21, 0.35, 0.68, 0.85, 0.58, 0.22], dtype=np.float32),
                 2: np.array([0.48, 0.78, 0.82, 0.32, 0.18, 0.20, 0.19, 0.25], dtype=np.float32),
                 3: np.array([0.16, 0.19, 0.22, 0.38, 0.62, 0.79, 0.49, 0.20], dtype=np.float32),
+                4: np.array([0.15, 0.11, 0.42, 0.75, 0.84, 0.62, 0.25, 0.18], dtype=np.float32),  # 水稻 (5月插秧泡田低值0.11，8月抽穗高峰0.84)
             }
 
         # 候选农作物集合（排除背景0）

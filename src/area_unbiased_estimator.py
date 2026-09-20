@@ -343,7 +343,12 @@ class AreaUnbiasedEstimator:
                 if k < int(count * 0.9):
                     true_lbl = cid
                 else:
-                    true_lbl = 0 if cid != 0 else (1 if 1 in all_crop_ids else 0)
+                    if cid != 0:
+                        true_lbl = 0
+                    else:
+                        # 仅当全图确实识别到农作物存在时，背景中才存在微量漏检；若全域为纯水体/非农田，则不注入农作物漏检
+                        present_crops = [c for c in all_crop_ids if c != 0 and map_pixel_dict.get(c, 0) > 0]
+                        true_lbl = present_crops[0] if present_crops else 0
                 records.append({
                     "sample_id": f"S{s_idx:02d}",
                     "stratum_id": f"A{cid}",
@@ -455,7 +460,8 @@ class AreaUnbiasedEstimator:
             0: 0.92,  # 背景/非农田精度
             1: 0.88,  # 玉米
             2: 0.94,  # 小麦 (冬小麦物候鲜明，精度通常最高)
-            3: 0.85   # 大豆
+            3: 0.85,  # 大豆
+            4: 0.90   # 水稻 (泡田插秧物候鲜明，先验精度通常较高)
         }
         sigmas = []
         for c in crop_codes:
