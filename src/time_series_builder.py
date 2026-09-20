@@ -84,6 +84,15 @@ class TimeSeriesBuilder:
             t = ts.shape[1]
             is_3d = False
 
+        # 防御性 NaN / Inf 缺测值清洗与像元级安全过滤
+        if np.isnan(ts).any() or np.isinf(ts).any():
+            ts = np.nan_to_num(ts, nan=0.0, posinf=1.0, neginf=0.0)
+
+        # 自适应数值范围归一化（兼容未缩放的 Sentinel-2 / Landsat L2A 地表反射率数据 0~10000）
+        val_max = float(np.max(ts)) if ts.size > 0 else 0.0
+        if val_max > 10.0:
+            ts = ts / 10000.0
+
         # 可选：时序去云抗噪平滑滤波（依据联合国手册 SITS 标准）
         if self.config.get("preprocessing", {}).get("apply_temporal_smoothing", False):
             ts = self.smooth_time_series(ts)

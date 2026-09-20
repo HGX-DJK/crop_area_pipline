@@ -161,11 +161,17 @@ class ParcelSegmenter:
             sub_parcel_id = parcel_id_mask[sl]
             sub_parcel_id[comp_mask_local] = valid_parcel_id
 
-            # 统计该地块内部的像元作物类别分布（多数投票原则）
+            # 统计该地块内部的像元作物类别分布（多数投票原则，排除内部空洞背景 0 像元）
             sub_crops = crop_classified_mask[sl][comp_mask_local]
-            classes, counts = np.unique(sub_crops, return_counts=True)
-            dominant_class = int(classes[np.argmax(counts)])
-            purity = float(np.max(counts) / len(sub_crops))
+            crop_only = sub_crops[sub_crops > 0]
+            if len(crop_only) > 0:
+                classes, counts = np.unique(crop_only, return_counts=True)
+                dominant_class = int(classes[np.argmax(counts)])
+                purity = float(np.max(counts) / len(crop_only))
+            else:
+                classes, counts = np.unique(sub_crops, return_counts=True)
+                dominant_class = int(classes[np.argmax(counts)]) if len(classes) > 0 else 1
+                purity = 1.0
 
             # 计算地块中心点像素坐标 (局部质心 + 切片原点偏移)
             local_coords = np.argwhere(comp_mask_local)

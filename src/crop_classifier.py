@@ -86,6 +86,7 @@ class CropClassifier:
                         closest_idx = int(np.argmin([abs(d - 200) for d in sample_doys]))
                     ts_values = raw_ts[:, [closest_idx]]
                     self.logger.info(f"  -> 自动匹配提取对应生长旺季 DOY {sample_doys[closest_idx]} 单时相物候特征")
+                    self.logger.warning("  -> [遥感物候提示] 当前输入为单时相影像，动态物候斜率与生长季差分特征处于单快照模式。若需高精度区分同季绿色作物（如玉米与大豆），建议提供多时相影像序列 (4~8景)。")
                 else:
                     # 多时相数量差异：沿时间轴执行物候曲线线性插值对齐
                     target_doys = doy_list if (doy_list and len(doy_list) == target_t) else np.linspace(sample_doys[0], sample_doys[-1], target_t)
