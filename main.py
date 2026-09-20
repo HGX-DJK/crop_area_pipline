@@ -63,7 +63,7 @@ def load_config(config_path="config.yaml"):
     return cfg
 
 
-def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False, streaming=False, n_jobs=None):
+def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False, streaming=False, n_jobs=None, clean_output=True):
     logger = get_logger("流水线", quiet=quiet)
     print("=" * 76)
     print("🌾 联合国农业统计遥感手册标准：农作物种植区域提取与零碎地块矢量化系统")
@@ -84,6 +84,22 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
 
     output_dir = config.get("paths", {}).get("output_dir", "output")
     os.makedirs(output_dir, exist_ok=True)
+
+    # 自动安全清理 output 目录中的历史遗留成果，避免不同时相/区域结果交叉混淆
+    if clean_output:
+        target_exts = (".geojson", ".csv", ".html", ".tif", ".tiff", ".png", ".jpg")
+        cleaned_files = 0
+        for fname in os.listdir(output_dir):
+            if fname.endswith(target_exts):
+                fpath = os.path.join(output_dir, fname)
+                if os.path.isfile(fpath):
+                    try:
+                        os.remove(fpath)
+                        cleaned_files += 1
+                    except Exception:
+                        pass
+        if cleaned_files > 0:
+            logger.info(f"已自动清理 output 目录中的 {cleaned_files} 个历史遗留成果文件，确保本次运行结果纯净独立。")
 
     # 2. 初始化特征工程构建器并加载遥感数据
     ts_builder = TimeSeriesBuilder(config)
@@ -289,6 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample-plan", action="store_true", help="是否执行联合国手册 Neyman 最优分层样方抽样设计并导出规划清单")
     parser.add_argument("--streaming", action="store_true", help="强制启用滑动窗口分块流式处理以极致节省内存")
     parser.add_argument("--n-jobs", type=int, default=None, help="多核多进程并行核心数 (默认: 读取配置文件或自动全核)")
+    parser.add_argument("--no-clean", dest="clean_output", action="store_false", default=True, help="保留 output 目录中的历史成果文件，不执行自动清理")
     parser.add_argument("--self-check", action="store_true", help="一键执行全系统自动化测试与健康自检")
     parser.add_argument("--quiet", action="store_true", help="开启静默模式，仅输出最终统计台账与严重错误")
     args = parser.parse_args()
@@ -307,5 +324,6 @@ if __name__ == "__main__":
         sample_plan=args.sample_plan,
         quiet=args.quiet,
         streaming=args.streaming,
-        n_jobs=args.n_jobs
+        n_jobs=args.n_jobs,
+        clean_output=args.clean_output
     )
