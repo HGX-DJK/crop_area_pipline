@@ -262,6 +262,16 @@ class ExecutiveReportGenerator:
             p_acc = row.get("producers_accuracy", "N/A")
             b_str = f"{row['bias_mu']:+.1f} 亩 ({row['bias_pct']:+.1f}%)"
 
+            # 动态变异系数徽章评级 (UN Handbook 标准)
+            if c_pct <= 5.0:
+                cv_badge_class = "badge-opt"
+            elif c_pct <= 10.0:
+                cv_badge_class = "badge-good"
+            elif c_pct <= 20.0:
+                cv_badge_class = "badge-warn"
+            else:
+                cv_badge_class = "badge-danger"
+
             is_highlight = "style='background:#f0fff4; font-weight:600;'" if c_name == focus_name else ""
             rows_tr += f"""
             <tr {is_highlight}>
@@ -269,7 +279,7 @@ class ExecutiveReportGenerator:
               <td>{n_mu:,.1f}</td>
               <td style="color:#22543d; font-weight:bold;">{c_mu:,.1f}</td>
               <td>±{s_mu:,.1f}</td>
-              <td><span class="badge {'badge-opt' if c_pct < 5.0 else 'badge-good'}">{c_pct:.2f}%</span></td>
+              <td><span class="badge {cv_badge_class}">{c_pct:.2f}%</span></td>
               <td>[{row['ci_95_lower_mu']:,.1f} ~ {row['ci_95_upper_mu']:,.1f}]</td>
               <td>{p_acc}</td>
               <td>{u_acc}</td>
@@ -306,6 +316,17 @@ class ExecutiveReportGenerator:
 
         unit_str = "亿亩" if calib_mu >= 10000000.0 else "万亩"
         div_factor = 100000000.0 if calib_mu >= 10000000.0 else 10000.0
+        se_disp_str = f"±{se_mu/10000.0:.1f} 万亩" if calib_mu >= 10000000.0 else f"±{se_mu:.1f} 亩"
+
+        # 动态判定变异系数评述文案 (依据联合国统计司质量标准)
+        if cv_pct <= 5.0:
+            cv_eval_text = "极高精度（优于联合国 5% 卓越统计控制标准，具备国家级法定直报采信资格）"
+        elif cv_pct <= 10.0:
+            cv_eval_text = "优良（符合联合国 10% 统计调查规程标准，具备官方直接采信资格）"
+        elif cv_pct <= 20.0:
+            cv_eval_text = "可接受（处于 10%~20% 统计监测允许区间，建议后续加密样方以进一步提升精度）"
+        else:
+            cv_eval_text = "抽样误差偏大（变异系数高于 20%，需扩充实地调查样方或优化分层以收敛误差）"
 
         return f"""
     <section class="section">
@@ -320,8 +341,8 @@ class ExecutiveReportGenerator:
       </p>
       <p class="section-desc">
         经核算，全域 <b>{focus_name}</b> 联合国法定无偏种植总面积为 <b>{calib_mu/div_factor:.2f} {unit_str}</b>（约 {calib_ha/10000.0:.2f} 万公顷）。
-        闭式解析标准误为 <b>±{se_mu/div_factor*10000.0:.1f} 万亩</b>，变异系数（CV）仅 <b>{cv_pct:.2f}%</b>（远优于联合国 10% 的优质标准），
-        制图精度（PA）达到 <b>{pa_str}</b>，用户精度（UA）达到 <b>{ua_str}</b>，具备法理防御力与官方直接采信资格。
+        闭式解析标准误为 <b>{se_disp_str}</b>，变异系数（CV）为 <b>{cv_pct:.2f}%</b>（{cv_eval_text}），
+        制图精度（PA）达到 <b>{pa_str}</b>，用户精度（UA）达到 <b>{ua_str}</b>。
       </p>
 
       <!-- 全作物统计大表 -->

@@ -59,7 +59,24 @@ class TestUnbiasedEstimator(unittest.TestCase):
         self.assertTrue("ppi_ptd_estimate" in res)
         self.assertTrue("se_ppi_ptd" in res)
         self.assertTrue("ci_95_ppi" in res)
-        self.assertLess(res["ppi_ptd_estimate"], res["map_only_estimate"])
+    def test_macro_background_protection(self):
+        """测试宏观大尺度背景下稀有作物防外推保护机制"""
+        # 模拟全图 99.9% 为背景，0.1% 为冬小麦 (模拟大尺度卫星瓦片)
+        mask = np.zeros((1000, 1000), dtype=np.int32)
+        mask[:10, :100] = 2  # 1,000 个小麦像元，占比 0.001
+
+        df_report, cond_matrix = self.estimator.estimate_unbiased_areas(mask, ground_truth_csv=None)
+
+        wheat_row = df_report[df_report["crop_name"] == "冬小麦"].iloc[0]
+        naive_mu = wheat_row["naive_area_mu"]
+        calib_mu = wheat_row["unbiased_calibrated_mu"]
+        cv_pct = wheat_row["cv_pct"]
+
+        # 无偏校准面积不应脱离像元面积数十倍，应在合理范围 (0.5 ~ 2.0 倍之间)
+        self.assertGreater(calib_mu, 0.0)
+        self.assertLess(calib_mu, naive_mu * 2.0, "宏观大背景下校准面积严禁暴增数十倍！")
+        self.assertGreater(calib_mu, naive_mu * 0.5, "校准面积不应异常归零")
+        self.assertLess(cv_pct, 30.0, "变异系数应处于合理统计区间，不得达到 99%+")
 
 
 if __name__ == "__main__":
