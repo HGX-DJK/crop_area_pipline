@@ -78,14 +78,14 @@ class AreaUnbiasedEstimator:
         W = np.array([float(map_pixel_dict.get(c, 0)) / total_pixels for c in all_crop_ids], dtype=np.float64)
 
         # 2. 读取地面抽样检验样方数据 (Ground Truth Reference Data)
-        if not os.path.exists(ground_truth_csv) and not os.path.isabs(ground_truth_csv):
+        if ground_truth_csv and not os.path.isabs(ground_truth_csv) and not os.path.exists(ground_truth_csv):
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             cand = os.path.join(project_root, ground_truth_csv)
             if os.path.exists(cand):
                 ground_truth_csv = cand
 
-        if not os.path.exists(ground_truth_csv):
-            self.logger.warning(f"未检测到地面检验样点数据文件 ({ground_truth_csv})。")
+        if not ground_truth_csv or not os.path.exists(ground_truth_csv):
+            self.logger.warning(f"未指定或未检测到地面检验样点数据文件 ({ground_truth_csv})。")
             self.logger.info("  -> 自动按照联合国分层抽样规范在内存中生成代表性地面验证样本...")
             df_sample = self._generate_synthetic_ground_truth_samples(all_crop_ids, map_pixel_dict)
         else:

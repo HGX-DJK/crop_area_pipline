@@ -42,13 +42,13 @@ class Visualizer:
     def plot_phenology_curves(self, pheno_curves_csv="data/sample_phenology_curves.csv", filename="phenology_signatures.png"):
         """绘制各作物全生长周期的物候时序特征指纹曲线。"""
         import pandas as pd
-        if not os.path.exists(pheno_curves_csv) and not os.path.isabs(pheno_curves_csv):
+        if pheno_curves_csv and not os.path.isabs(pheno_curves_csv) and not os.path.exists(pheno_curves_csv):
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             cand = os.path.join(project_root, pheno_curves_csv)
             if os.path.exists(cand):
                 pheno_curves_csv = cand
 
-        if not os.path.exists(pheno_curves_csv):
+        if not pheno_curves_csv or not os.path.exists(pheno_curves_csv):
             df = pd.DataFrame([
                 {"crop_id": 0, "crop_name": "非农田/背景", "doy_80": 0.18, "doy_110": 0.20, "doy_140": 0.22, "doy_170": 0.21, "doy_200": 0.23, "doy_230": 0.22, "doy_260": 0.20, "doy_290": 0.18},
                 {"crop_id": 1, "crop_name": "夏玉米", "doy_80": 0.15, "doy_110": 0.18, "doy_140": 0.21, "doy_170": 0.35, "doy_200": 0.68, "doy_230": 0.85, "doy_260": 0.58, "doy_290": 0.22},

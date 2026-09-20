@@ -56,14 +56,14 @@ class CropClassifier:
         若传入 ts_builder，则通过特征工程模块对标定样点执行相同的物候特征提取。
         - 具备自动时相自适应对齐功能（无论输入是 1 个时相、多时相还是全时序，均自动对齐特征空间）。
         """
-        if not os.path.exists(training_csv_path) and not os.path.isabs(training_csv_path):
+        if training_csv_path and not os.path.isabs(training_csv_path) and not os.path.exists(training_csv_path):
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             cand = os.path.join(project_root, training_csv_path)
             if os.path.exists(cand):
                 training_csv_path = cand
 
-        if not os.path.exists(training_csv_path):
-            self.logger.warning(f"未检测到外部训练样本数据文件 ({training_csv_path})。")
+        if not training_csv_path or not os.path.exists(training_csv_path):
+            self.logger.warning(f"未指定或未检测到外部训练样本数据文件 ({training_csv_path})。")
             self.logger.info("  -> 自动激活智能物候指纹生成器：基于作物物候曲线库在内存中自动合成 200 个带真实抗噪波动的多时相标定样点...")
             df = self._generate_synthetic_training_samples()
         else:
