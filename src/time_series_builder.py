@@ -136,9 +136,13 @@ class TimeSeriesBuilder:
             # 特征 1：泡田期特征低值下陷深度 (Flooding Dip Depth)
             paddy_flooding_dip = np.maximum(0.0, ts[:, [0]] - early_min)
             # 特征 2：移栽后冠层爆发式跃变跨度 (Post-Transplanting Rebound Surge)
-            paddy_rebound_surge = ndvi_max - early_min
+            paddy_rebound_surge = np.maximum(0.0, ndvi_max - early_min)
             # 特征 3：水稻特征 V 形物候淹水指纹指数 (V-Transplanting Signal)
-            paddy_v_index = (paddy_flooding_dip / (ts[:, [0]] + 0.05)) * (paddy_rebound_surge / (ndvi_max + 0.05))
+            # 防御性分母数值保护：遥感水体/阴影等负 NDVI 像元在 +0.05 后可能为 0 或负数，执行安全下限截断
+            denom_dip = np.where(ts[:, [0]] + 0.05 > 0.02, ts[:, [0]] + 0.05, 0.05)
+            denom_surge = np.where(ndvi_max + 0.05 > 0.02, ndvi_max + 0.05, 0.05)
+            paddy_v_index = (paddy_flooding_dip / denom_dip) * (paddy_rebound_surge / denom_surge)
+            paddy_v_index = np.nan_to_num(paddy_v_index, nan=0.0, posinf=0.0, neginf=0.0)
         else:
             paddy_flooding_dip = np.zeros_like(ndvi_max)
             paddy_rebound_surge = np.zeros_like(ndvi_max)

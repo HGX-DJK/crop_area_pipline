@@ -29,12 +29,14 @@ crop_legend:
   1: "耕地"               # Cropland (含正在耕种的一年生作物、多年生木本作物、休耕地及温室等)
 
 segmentation:
-  # 针对零碎小农田块（小至 0.5 亩 ~ 2 亩）的形态学切分参数
+  # 针对零碎小农田块与宏观连片农田的形态学与分水岭切分参数
   apply_boundary_erosion: true # 是否开启窄田埂边缘腐蚀（防止相邻不同地块粘连）
   fill_internal_holes: true    # 是否闭合田块内部孤立的微小车辙与像元阴影空洞
   smooth_boundaries: true      # 是否开启 Chaikin 拐角切割拓扑平滑（消除栅格阶梯锯齿）
-  min_parcel_area_m2: 200.0    # 最小合法地块面积阈值（平方米，200㎡ ≈ 0.3 亩，过滤噪声碎斑）
-  max_parcel_area_m2: 500000.0 # 最大合法地块面积阈值（平方米，50 公顷）
+  subdivide_oversized: true    # 是否开启超大连片农田智能分水岭切分（基于距离变换核心种子切分粘连大田）
+  min_parcel_area_m2: 200.0    # 最小合法地块面积阈值（高分下约0.3亩，中分辨率下系统自适应上浮至至少2像元）
+  max_parcel_area_m2: 500000.0 # 触发智能细分的单块面积阈值（平方米，50 公顷 ≈ 750 亩）
+  discard_oversized: false     # 是否丢弃超过上限的斑块（严禁丢弃真实农田，设为 false 保留超大集中连片农田）
   max_export_parcels: 500      # 矢量化导出的主力核心地块最大数量上限（优先选取面积前 N 个主力产区，保障浏览器轻量秒开）
   connectivity: 8              # 连通域拓扑连接方式（4连通或8连通）
 

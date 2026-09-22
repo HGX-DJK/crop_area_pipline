@@ -22,6 +22,15 @@ from src.utils.logger import get_logger, log_success
 # 优雅导入地理空间处理库，若未安装则提供友好提示
 try:
     import rasterio
+    import rasterio.env
+    proj_cand = os.path.join(os.path.dirname(rasterio.__file__), "proj_data")
+    if os.path.exists(proj_cand):
+        try:
+            rasterio.env.set_proj_data_search_path(proj_cand)
+            os.environ["PROJ_LIB"] = proj_cand
+            os.environ["PROJ_DATA"] = proj_cand
+        except Exception:
+            pass
     HAS_RASTERIO = True
 except ImportError:
     HAS_RASTERIO = False

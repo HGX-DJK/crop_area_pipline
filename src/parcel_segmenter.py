@@ -23,10 +23,80 @@ class ParcelSegmenter:
         self.apply_erosion = seg_cfg.get("apply_boundary_erosion", True)
         self.min_area_m2 = seg_cfg.get("min_parcel_area_m2", 200.0)
         self.max_area_m2 = seg_cfg.get("max_parcel_area_m2", 500000.0)
+        self.subdivide_oversized = seg_cfg.get("subdivide_oversized", True)
+        self.discard_oversized = seg_cfg.get("discard_oversized", False)
         self.max_export_parcels = seg_cfg.get("max_export_parcels", 500)
         self.connectivity = seg_cfg.get("connectivity", 8)
         self.spatial_res = self.config.get("spatial", {}).get("resolution_meters", 10.0)
         self.pixel_area_m2 = self.spatial_res * self.spatial_res  # 10m x 10m = 100 m²
+
+    def _subdivide_oversized_component(self, sub_binary_mask: np.ndarray, min_peak_distance_m: float = 120.0) -> np.ndarray:
+        """
+        基于欧式距离变换与标记分水岭算法 (Distance Transform + Watershed)，
+        将过度粘连的超大连片农田斑块智能切分为规整的标准化田块单元。
+        如果斑块属于单一均质超大田块 (仅有单一峰值核心)，则保持整体不拆解。
+        
+        参数：
+            sub_binary_mask: 斑块局部二值掩膜 (0/1 uint8)
+            min_peak_distance_m: 识别田块几何核心的最小物理间距 (米，默认 120 米)
+        返回：
+            sub_labeled: 局部多边形标记矩阵 (0 为背景，1..K 为分割后的各子地块)
+        """
+        # 局部外包矩形周围垫充 1 像素背景 0，确保距离变换正确以真实外轮廓为基准（避免边界截断伪影）
+        padded_mask = np.pad(sub_binary_mask, pad_width=1, mode="constant", constant_values=0)
+        try:
+            import cv2
+            dist = cv2.distanceTransform(padded_mask, cv2.DIST_L2, 5)[1:-1, 1:-1]
+        except Exception:
+            dist = ndimage.distance_transform_edt(padded_mask).astype(np.float32)[1:-1, 1:-1]
+
+        max_dist = float(np.max(dist)) if dist.size > 0 else 0.0
+        if max_dist < 2.0:
+            return sub_binary_mask.astype(np.int32)
+
+        # 依据空间分辨率动态计算核心峰值最小间距 (像元窗口)
+        win = max(3, int(round(min_peak_distance_m / max(float(self.spatial_res), 1.0))))
+        if win % 2 == 0:
+            win += 1
+
+        try:
+            import cv2
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (win, win))
+            dilated = cv2.dilate(dist, kernel)
+        except Exception:
+            dilated = ndimage.maximum_filter(dist, size=win)
+
+        threshold_height = max(1.5, max_dist * 0.20)
+        local_peaks = (dist == dilated) & (dist >= threshold_height) & (sub_binary_mask > 0)
+
+        try:
+            import cv2
+            num_peaks, peak_markers = cv2.connectedComponents(local_peaks.astype(np.uint8), connectivity=8)
+            num_peaks -= 1
+        except Exception:
+            peak_markers, num_peaks = ndimage.label(local_peaks)
+
+        # 仅有 1 个或 0 个核心种子点时，说明是均质单体大田，不予过度拆解
+        if num_peaks <= 1:
+            return sub_binary_mask.astype(np.int32)
+
+        try:
+            import cv2
+            sub_bgr = cv2.cvtColor(sub_binary_mask * 255, cv2.COLOR_GRAY2BGR)
+            markers = peak_markers.astype(np.int32)
+            cv2.watershed(sub_bgr, markers)
+            markers[markers <= 0] = 0
+            markers[sub_binary_mask == 0] = 0
+            
+            # 若分水岭边界缝隙导致少量像元未分配，执行就地近邻补齐
+            unassigned = (markers == 0) & (sub_binary_mask > 0)
+            if np.any(unassigned):
+                _, nearest_idx = ndimage.distance_transform_edt(markers == 0, return_indices=True)
+                markers[unassigned] = markers[nearest_idx[0][unassigned], nearest_idx[1][unassigned]]
+            return markers
+        except Exception as e:
+            self.logger.warning(f"分水岭切分异常 ({e})，保留原始斑块。")
+            return sub_binary_mask.astype(np.int32)
 
     def segment_parcels(self, crop_classified_mask, confidence_map=None):
         """
@@ -46,7 +116,6 @@ class ParcelSegmenter:
         cropland_binary = (crop_classified_mask > 0).astype(np.uint8)
 
         # 2. 依据联合国手册第 8 章：矢量化计算不同作物交界处的边界梯度（Zero-Copy Slicing）
-        # 相邻不同作物之间执行原地切片差分检测防止误粘连（免除 4 次 np.roll 内存复制与环绕伪影）
         gradient_edges = np.zeros((rows, cols), dtype=bool)
         if rows > 1:
             diff_v = (crop_classified_mask[:-1, :] > 0) & (crop_classified_mask[1:, :] > 0) & (crop_classified_mask[:-1, :] != crop_classified_mask[1:, :])
@@ -59,18 +128,23 @@ class ParcelSegmenter:
 
         # 将不同作物交界处切开
         cropland_binary[gradient_edges] = 0
-        del gradient_edges  # 立即释放边界梯度掩膜内存
+        del gradient_edges
 
         # 3. 形态学腐蚀（Erosion）与开运算（Opening）切断细小桥接
-        # 仅针对高分辨率影像（像元 < 20米）执行田埂切分；对于中低分辨率/宏观尺度栅格，单个像元已远大于真实田埂，跳过腐蚀以防过度消除
-        if self.apply_erosion and self.spatial_res < 20.0:
-            k_size = max(3, int(round(18.0 / max(float(self.spatial_res), 1.0))))
-            if k_size % 2 == 0:
-                k_size += 1
-            k_size = min(k_size, 9)
-            structure = np.ones((k_size, k_size), dtype=np.uint8) if self.connectivity == 8 else ndimage.generate_binary_structure(2, 1)
-            cleaned = ndimage.binary_opening(cropland_binary, structure=structure).astype(np.uint8)
-            del cropland_binary  # 释放原始二值掩膜
+        if self.apply_erosion:
+            if self.spatial_res < 20.0:
+                # 高分辨率 (10m 哨兵 / 2m 高分)：按物理米数计算结构元
+                k_size = max(3, int(round(18.0 / max(float(self.spatial_res), 1.0))))
+                if k_size % 2 == 0:
+                    k_size += 1
+                k_size = min(k_size, 9)
+                structure = np.ones((k_size, k_size), dtype=np.uint8) if self.connectivity == 8 else ndimage.generate_binary_structure(2, 1)
+                cleaned = ndimage.binary_opening(cropland_binary, structure=structure).astype(np.uint8)
+            else:
+                # 中低分辨率 (如 30m Landsat/CSDC30)：采用十字结构元切断角点对角粘连，杜绝过度消除
+                structure_cross = ndimage.generate_binary_structure(2, 1)
+                cleaned = ndimage.binary_opening(cropland_binary, structure=structure_cross).astype(np.uint8)
+            del cropland_binary
         else:
             cleaned = cropland_binary
 
@@ -81,26 +155,66 @@ class ParcelSegmenter:
         # 4. 连通域标记（Connected Component Labeling）
         struct_conn = ndimage.generate_binary_structure(2, 2 if self.connectivity == 8 else 1)
         labeled_array, num_features = ndimage.label(cleaned, structure=struct_conn)
-        del cleaned  # 释放清洗掩膜，避免与标记数组并存浪费内存
+        del cleaned
 
         self.logger.info(f"初步识别到 {num_features} 个候选连通斑块。")
 
-        # 5. 自适应面积阈值过滤与元数据提取
-        # 针对高分辨率影像 (10m 哨兵 / 2m 高分)，严格使用 200㎡ ~ 500,000㎡ 规整小农地块阈值；
-        # 针对中低分辨率大尺度影像 (像元物理面积超过设定上限)，自适应缩放面积上下限，防止因单像元面积超标导致提取为 0
-        if self.pixel_area_m2 > self.max_area_m2:
-            eff_min_area = self.pixel_area_m2 * 1.0
-            eff_max_area = self.pixel_area_m2 * 20000.0
-            self.logger.info(f"当前输入影像为宏观尺度遥感图 (像元跨度: {self.spatial_res:.1f}米，单像元面积: {sqm_to_mu(self.pixel_area_m2, 1):.1f}亩)，已自动将地块过滤上下限动态调整为 {sqm_to_mu(eff_min_area, 1):.1f} ~ {sqm_to_mu(eff_max_area, 1):.1f} 亩。")
+        # 5. 针对超大连片农田执行欧式距离变换与分水岭智能细分 (Watershed Subdivision)
+        # 避免将相邻多个规整农田因田埂模糊粘连为几万亩巨斑，同时杜绝直接丢弃大农田
+        eff_max_area = float(self.max_area_m2) if (self.max_area_m2 and self.max_area_m2 > 0) else float("inf")
+        subdivide_threshold = eff_max_area
+
+        if self.subdivide_oversized and num_features > 0 and subdivide_threshold < float("inf"):
+            counts = np.bincount(labeled_array.ravel())
+            comp_areas = counts[1:num_features + 1] * self.pixel_area_m2
+            oversized_cids = np.where(comp_areas > subdivide_threshold)[0] + 1
+
+            if len(oversized_cids) > 0:
+                self.logger.info(f"检测到 {len(oversized_cids)} 个面积超标连片农田区域 (>{sqm_to_mu(subdivide_threshold, 1):.1f} 亩)，正在执行分水岭核心种子自适应切分...")
+                slices = ndimage.find_objects(labeled_array)
+                next_label = num_features + 1
+                subdivided_count = 0
+                new_sub_parcels_count = 0
+
+                for cid in oversized_cids:
+                    sl = slices[cid - 1]
+                    if sl is None:
+                        continue
+                    sub_labeled = labeled_array[sl]
+                    local_mask = (sub_labeled == cid).astype(np.uint8)
+
+                    sub_res = self._subdivide_oversized_component(local_mask)
+                    u_sub = np.unique(sub_res[sub_res > 0])
+
+                    if len(u_sub) > 1:
+                        subdivided_count += 1
+                        new_sub_parcels_count += len(u_sub)
+                        for idx, sub_u in enumerate(u_sub):
+                            m_sub = (sub_res == sub_u)
+                            if idx == 0:
+                                sub_labeled[m_sub] = cid
+                            else:
+                                sub_labeled[m_sub] = next_label
+                                next_label += 1
+
+                num_features = next_label - 1
+                if subdivided_count > 0:
+                    self.logger.info(f"  -> 分水岭切分完成: 成功将 {subdivided_count} 个超大连片区精细解构为 {new_sub_parcels_count} 个规整田块单元。")
+
+        # 6. 自适应面积阈值过滤与元数据提取
+        # 自适应最小有效面积：必须至少覆盖 2 个像元，滤除单像元椒盐噪声
+        eff_min_area = max(float(self.min_area_m2), float(self.pixel_area_m2 * 2.0))
+
+        # 核心保障：默认严禁丢弃大农田 (discard_oversized=False)；大农田细分后仍较大的部分将作为规模化连片产区完整保留
+        if self.discard_oversized and eff_max_area < float("inf"):
+            filter_max_area = eff_max_area
         else:
-            eff_min_area = self.min_area_m2
-            eff_max_area = self.max_area_m2
+            filter_max_area = float("inf")
 
         parcel_id_mask = np.zeros((rows, cols), dtype=np.int32)
         parcel_metadata = []
         valid_parcel_id = 1
 
-        # 统计每个斑块的像素数量与物理面积 (底层 C 级单次直方图统计极速加速，耗时从秒级降至毫秒级)
         if num_features > 0:
             counts = np.bincount(labeled_array.ravel())
             component_sizes = counts[1:num_features + 1]
@@ -112,19 +226,16 @@ class ParcelSegmenter:
         total_candidate_m2 = float(np.sum(component_sizes)) * self.pixel_area_m2
         total_candidate_mu = sqm_to_mu(total_candidate_m2, 2)
 
-        # 核心修正：必须【先基于面积有效性过滤】，再在合规地块中按面积优选 Top N 主力地块！
         if num_features > 0:
-            # 1. 优先在标准地块面积区间 [eff_min_area, eff_max_area] 内筛选
-            valid_mask = (candidate_areas_m2 >= eff_min_area) & (candidate_areas_m2 <= eff_max_area)
+            valid_mask = (candidate_areas_m2 >= eff_min_area) & (candidate_areas_m2 <= filter_max_area)
             valid_comp_indices = np.where(valid_mask)[0] + 1
 
-            # 2. 宏观自适应兜底：若全图为宏观大幅宽大平原，连通斑块普遍大于小农上限，自动放宽上限保留主力核心产区
             if len(valid_comp_indices) == 0:
-                self.logger.warning(f"全域候选斑块均大于设定的单块上限 ({sqm_to_mu(eff_max_area, 1):.1f} 亩)，已自动激活宏观农业大基地自适应放宽机制...")
-                valid_mask = (candidate_areas_m2 >= eff_min_area)
+                self.logger.warning("未检测到符合面积区间的候选斑块，自动放宽下限保留全部候选斑块...")
+                valid_mask = (candidate_areas_m2 > 0)
                 valid_comp_indices = np.where(valid_mask)[0] + 1
 
-            # 3. 在真正合规的候选斑块中，按面积降序排列优选主力地块
+            # 按面积降序排列优选主力核心地块
             sorted_order = np.argsort(-candidate_areas_m2[valid_comp_indices - 1])
             sorted_valid = valid_comp_indices[sorted_order]
 
@@ -143,7 +254,7 @@ class ParcelSegmenter:
         else:
             comp_indices = []
 
-        # 预计算各斑块的最小外包矩形切片，避免每次对全图进行几千万像素的大矩阵遍历
+        # 重新计算最新切片 (此时 labeled_array 已包含细分的新编号)
         slices = ndimage.find_objects(labeled_array)
 
         for comp_id in comp_indices:
@@ -161,7 +272,7 @@ class ParcelSegmenter:
             sub_parcel_id = parcel_id_mask[sl]
             sub_parcel_id[comp_mask_local] = valid_parcel_id
 
-            # 统计该地块内部的像元作物类别分布（多数投票原则，排除内部空洞背景 0 像元）
+            # 统计该地块内部作物类别分布
             sub_crops = crop_classified_mask[sl][comp_mask_local]
             crop_only = sub_crops[sub_crops > 0]
             if len(crop_only) > 0:
@@ -173,18 +284,15 @@ class ParcelSegmenter:
                 dominant_class = int(classes[np.argmax(counts)]) if len(classes) > 0 else 1
                 purity = 1.0
 
-            # 计算地块中心点像素坐标 (局部质心 + 切片原点偏移)
             local_coords = np.argwhere(comp_mask_local)
             center_r = float(np.mean(local_coords[:, 0]) + sl[0].start)
             center_c = float(np.mean(local_coords[:, 1]) + sl[1].start)
 
-            # 计算平均置信度
             if confidence_map is not None:
                 mean_conf = float(np.mean(confidence_map[sl][comp_mask_local]))
             else:
                 mean_conf = 1.0
 
-            # 换算中国通用农业面积单位：1 亩 = 666.67 平方米 = 1/15 公顷 (统一计量工具)
             area_mu = sqm_to_mu(area_m2, decimals=2)
             area_hectares = sqm_to_ha(area_m2, decimals=4)
 

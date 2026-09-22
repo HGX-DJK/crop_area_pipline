@@ -12,6 +12,18 @@ import time
 # 确保主路径在 Python 模块检索列表中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Windows 环境下自动探测并配置 PROJ 数据路径
+try:
+    import rasterio
+    import rasterio.env
+    proj_cand = os.path.join(os.path.dirname(rasterio.__file__), "proj_data")
+    if os.path.exists(proj_cand):
+        rasterio.env.set_proj_data_search_path(proj_cand)
+        os.environ["PROJ_LIB"] = proj_cand
+        os.environ["PROJ_DATA"] = proj_cand
+except Exception:
+    pass
+
 
 def main():
     print("=" * 80)
