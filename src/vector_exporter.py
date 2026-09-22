@@ -514,8 +514,15 @@ class VectorExporter:
 
             with rasterio.open(output_tif_path, "w", **meta) as dst:
                 dst.write(classified_mask.astype(np.uint8), 1)
+                # 依据 COG 规范构建内部多级分辨率金字塔 (Overviews)，在 QGIS/ArcGIS/WebGIS 中实现秒开
+                try:
+                    from rasterio.enums import Resampling
+                    dst.build_overviews([2, 4, 8, 16], Resampling.nearest)
+                    dst.update_tags(ns="rio_overview", resampling="nearest")
+                except Exception:
+                    pass
 
-            log_success(self.logger, f"已成功保存带地理坐标与 LZW 无损压缩的分类 GeoTIFF: {output_tif_path}")
+            log_success(self.logger, f"已成功保存带地理坐标、金字塔Overviews与 LZW 无损压缩的分类 GeoTIFF: {output_tif_path}")
             return output_tif_path
         except ImportError:
             self.logger.warning("未安装 rasterio，跳过真实 GeoTIFF 导出（GeoJSON 与 PNG 仍正常输出）。")
