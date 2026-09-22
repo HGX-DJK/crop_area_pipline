@@ -81,13 +81,23 @@ class CropClassifier:
             if target_t is not None and target_t != raw_ts.shape[1]:
                 self.logger.info(f"输入影像时相数 (T={target_t}) 与标定样本基准 (T={raw_ts.shape[1]}) 不同，正在执行自适应对齐...")
                 if target_t == 1:
-                    # 单时相影像：匹配对应 DOY 或提取盛夏作物生长峰值期 (DOY 200)
-                    if doy_list and len(doy_list) > 0:
-                        closest_idx = int(np.argmin([abs(d - doy_list[0]) for d in sample_doys]))
+                    # 单时相遥感影像模式 (T=1)
+                    cur_doy = doy_list[0] if (doy_list and len(doy_list) > 0) else 150
+                    self.logger.info(f"  -> 单时相遥感影像模式 (T=1, DOY {cur_doy}): 启用多源冠层绿度与物候特征匹配提取...")
+                    if len(self.crop_legend) <= 3:
+                        # 耕地二分类模式：非耕地为低值背景 (NDVI < 0.22)，耕地为活跃作物生长冠层 (NDVI >= 0.35)
+                        ts_1d = []
+                        for _, row in df.iterrows():
+                            c_label = int(row["label"])
+                            vals = row[doy_cols].values.astype(np.float32)
+                            if c_label == 0:
+                                ts_1d.append(np.mean(vals[:3]))
+                            else:
+                                ts_1d.append(np.max(vals))
+                        ts_values = np.array(ts_1d, dtype=np.float32).reshape(-1, 1)
                     else:
-                        closest_idx = int(np.argmin([abs(d - 200) for d in sample_doys]))
-                    ts_values = raw_ts[:, [closest_idx]]
-                    self.logger.info(f"  -> 自动匹配提取对应生长旺季 DOY {sample_doys[closest_idx]} 单时相物候特征")
+                        closest_idx = int(np.argmin([abs(d - cur_doy) for d in sample_doys]))
+                        ts_values = raw_ts[:, [closest_idx]]
                     self.logger.warning("  -> [遥感物候提示] 当前输入为单时相影像，动态物候斜率与生长季差分特征处于单快照模式。若需高精度区分同季绿色作物（如玉米与大豆），建议提供多时相影像序列 (4~8景)。")
                 else:
                     # 多时相数量差异：沿时间轴执行物候曲线线性插值对齐
@@ -168,15 +178,41 @@ class CropClassifier:
         records = []
         p_idx = 1
         for cid, cname in self.crop_legend.items():
-            base = base_curves.get(cid, base_curves[0])
+            if cid == 255:
+                continue
             for k in range(n_per_class):
-                # 类别 0 特别注入 50% 水体/大洋/阴影样本 (NDVI <= 0.05) 与 50% 裸地样本
-                if cid == 0 and k < (n_per_class // 2):
-                    water_val = np.random.uniform(-0.05, 0.05)
-                    ts_sample = np.clip(np.zeros(len(doys)) + water_val + np.random.normal(0, 0.01, size=len(doys)), -0.2, 0.10)
-                else:
+                if cid == 0:
+                    # 非耕地：水体、裸地荒漠、城镇不透水面
+                    sub_t = k % 3
+                    if sub_t == 0:
+                        water_val = np.random.uniform(-0.10, 0.05)
+                        ts_sample = np.clip(np.zeros(len(doys)) + water_val + np.random.normal(0, 0.01, size=len(doys)), -0.2, 0.10)
+                    elif sub_t == 1:
+                        soil_val = np.random.uniform(0.08, 0.20)
+                        ts_sample = np.clip(np.zeros(len(doys)) + soil_val + np.random.normal(0, 0.02, size=len(doys)), 0.05, 0.24)
+                    else:
+                        urban_val = np.random.uniform(0.08, 0.16)
+                        ts_sample = np.clip(np.zeros(len(doys)) + urban_val + np.random.normal(0, 0.015, size=len(doys)), 0.05, 0.20)
+                elif cid == 1 and len(self.crop_legend) <= 2:
+                    # 耕地二分类：混合玉米、冬小麦、大豆、水稻、常绿设施农业的多源物候指纹
+                    crop_sub = k % 5
+                    if crop_sub == 0:
+                        base = base_curves[1] # 夏玉米
+                    elif crop_sub == 1:
+                        base = base_curves[2] # 冬小麦/越冬作物 (冬春季高绿度)
+                    elif crop_sub == 2:
+                        base = base_curves[3] # 大豆
+                    elif crop_sub == 3:
+                        base = base_curves[4] # 水稻
+                    else:
+                        base = [0.45, 0.52, 0.55, 0.58, 0.60, 0.58, 0.52, 0.48] # 设施农业/常绿作物
                     noise = np.random.normal(0.0, 0.02, size=len(doys))
                     ts_sample = np.clip(np.array(base) + noise, 0.05, 0.95)
+                else:
+                    base = base_curves.get(cid, base_curves[0])
+                    noise = np.random.normal(0.0, 0.02, size=len(doys))
+                    ts_sample = np.clip(np.array(base) + noise, 0.05, 0.95)
+
                 row = {
                     "point_id": f"P{p_idx:04d}",
                     "label": int(cid),

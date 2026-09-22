@@ -503,7 +503,7 @@ class VectorExporter:
             meta = {
                 "driver": "GTiff",
                 "dtype": "uint8",
-                "nodata": 0,
+                "nodata": 255,
                 "width": w,
                 "height": h,
                 "count": 1,

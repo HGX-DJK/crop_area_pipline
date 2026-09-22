@@ -79,6 +79,10 @@ class RasterLoader:
             crs_str = str(src.crs) if src.crs else self.spatial_cfg.get("crs", "EPSG:32650")
             parsed_zone, parsed_northern = parse_utm_zone(crs_str, default_zone=self.spatial_cfg.get("utm_zone", 50))
 
+            # 智能检测是否为 SDC30 (Dataset 26) 6波段地表反射率无缝立方体数据 (1:Blue, 2:Green, 3:Red, 4:NIR, 5:SWIR1, 6:SWIR2)
+            first_fname = os.path.basename(tif_files[0])
+            is_sdc6 = (src.count == 6) or (src.count >= 4 and ("CSDC" in first_fname or "SDC" in first_fname))
+
             geo_info = {
                 "crs": crs_str,
                 "transform": src.transform,
@@ -92,13 +96,22 @@ class RasterLoader:
                 "utm_zone": parsed_zone,
                 "northern": parsed_northern,
                 "nodata": src.nodata,
-                "count": src.count
+                "count": src.count,
+                "is_sdc6": is_sdc6
             }
 
-            if len(tif_files) == 1 and src.count > 1:
-                is_multiband = True
-                doy_list = [b * 30 for b in range(1, src.count + 1)]
-                return tif_files, geo_info, doy_list, is_multiband
+            if is_sdc6:
+                self.logger.info("  -> 🛰️ 成功识别为 SDC30 (Dataset 26) 多光谱无缝数据立方体！自动激活近红外/红光物理 NDVI 提取器 (Band 4: NIR, Band 3: Red)。")
+
+            if len(tif_files) == 1:
+                if is_sdc6:
+                    is_multiband = False
+                    doy_list = [parse_temporal_doy(first_fname, default_doy=1)]
+                    return tif_files, geo_info, doy_list, is_multiband
+                elif src.count > 1:
+                    is_multiband = True
+                    doy_list = [b * 30 for b in range(1, src.count + 1)]
+                    return tif_files, geo_info, doy_list, is_multiband
 
         # 多景文件检验地理空间范围一致性与解析各自时相 DOY
         base_bounds = geo_info.get("bounds")
@@ -156,6 +169,8 @@ class RasterLoader:
                 is_multiband = auto_multiband
             h, w = geo_info["height"], geo_info["width"]
 
+        is_sdc6 = geo_info.get("is_sdc6", False)
+
         # 打开所有文件句柄（仅保留指针，不读取像元）
         src_handles = [rasterio.open(f) for f in sorted_files]
         try:
@@ -166,7 +181,20 @@ class RasterLoader:
                     win = Window(col_off=c, row_off=r, width=bw, height=bh)
 
                     band_slices = []
-                    if is_multiband and len(src_handles) == 1:
+                    if is_sdc6:
+                        # SDC30 (Dataset 26) 6波段反射率数据：提取 NDVI (Band 4: NIR, Band 3: Red)
+                        for src in src_handles:
+                            b3 = src.read(3, window=win).astype(np.float32)
+                            b4 = src.read(4, window=win).astype(np.float32)
+                            denom = b4 + b3
+                            valid = denom > 0
+                            ndvi = np.zeros_like(b3)
+                            ndvi[valid] = (b4[valid] - b3[valid]) / denom[valid]
+                            if src.nodata is not None:
+                                ndvi[b3 == src.nodata] = np.nan
+                                ndvi[b4 == src.nodata] = np.nan
+                            band_slices.append(ndvi)
+                    elif is_multiband and len(src_handles) == 1:
                         src = src_handles[0]
                         for b in range(1, src.count + 1):
                             arr = src.read(b, window=win).astype(np.float32)
@@ -197,18 +225,28 @@ class RasterLoader:
         if not HAS_RASTERIO:
             return np.zeros((100, 100), dtype=np.float32)
 
-        sorted_files, _, _, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+        sorted_files, geo_info, _, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+        is_sdc6 = geo_info.get("is_sdc6", False)
         target_file = sorted_files[0]
         with rasterio.open(target_file) as src:
             step = max(1, max(src.height, src.width) // max_dim)
             out_h = max(1, src.height // step)
             out_w = max(1, src.width // step)
-            band_idx = (src.count // 2 + 1) if (is_multiband and src.count > 1) else 1
-            try:
-                from rasterio.enums import Resampling
-                thumbnail = src.read(band_idx, out_shape=(out_h, out_w), resampling=Resampling.bilinear).astype(np.float32)
-            except Exception:
-                thumbnail = src.read(band_idx, out_shape=(out_h, out_w)).astype(np.float32)
+            if is_sdc6:
+                # SDC30 物理反射率数据：提取 Band 4 (NIR) 与 Band 3 (Red) 计算真实物理 NDVI 缩略图
+                b3 = src.read(3, out_shape=(out_h, out_w)).astype(np.float32)
+                b4 = src.read(4, out_shape=(out_h, out_w)).astype(np.float32)
+                denom = b4 + b3
+                valid = denom > 0
+                thumbnail = np.zeros_like(b3)
+                thumbnail[valid] = (b4[valid] - b3[valid]) / denom[valid]
+            else:
+                band_idx = (src.count // 2 + 1) if (is_multiband and src.count > 1) else 1
+                try:
+                    from rasterio.enums import Resampling
+                    thumbnail = src.read(band_idx, out_shape=(out_h, out_w), resampling=Resampling.bilinear).astype(np.float32)
+                except Exception:
+                    thumbnail = src.read(band_idx, out_shape=(out_h, out_w)).astype(np.float32)
 
             if src.nodata is not None:
                 thumbnail[thumbnail == src.nodata] = np.nan
@@ -227,6 +265,7 @@ class RasterLoader:
         对于中小型影像直接返回全图三维矩阵；对于大图推荐配合 iter_raster_windows 流式处理。
         """
         sorted_files, geo_info, doy_list, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+        is_sdc6 = geo_info.get("is_sdc6", False)
 
         h, w = geo_info["height"], geo_info["width"]
         total_t = len(doy_list)
@@ -239,7 +278,20 @@ class RasterLoader:
         # 就地预分配三维立方体，避免通过列表累积再使用 np.stack 导致的双倍内存峰值
         raster_cube = np.empty((h, w, total_t), dtype=np.float32)
 
-        if is_multiband and len(sorted_files) == 1:
+        if is_sdc6:
+            for idx, tif_path in enumerate(sorted_files):
+                with rasterio.open(tif_path) as src:
+                    b3 = src.read(3).astype(np.float32)
+                    b4 = src.read(4).astype(np.float32)
+                    denom = b4 + b3
+                    valid = denom > 0
+                    ndvi = np.zeros_like(b3)
+                    ndvi[valid] = (b4[valid] - b3[valid]) / denom[valid]
+                    if src.nodata is not None:
+                        ndvi[b3 == src.nodata] = np.nan
+                        ndvi[b4 == src.nodata] = np.nan
+                    raster_cube[:, :, idx] = ndvi
+        elif is_multiband and len(sorted_files) == 1:
             with rasterio.open(sorted_files[0]) as src:
                 self.logger.info(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")
                 for b in range(1, src.count + 1):

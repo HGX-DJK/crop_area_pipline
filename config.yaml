@@ -27,7 +27,6 @@ spatial:
 crop_legend:
   0: "非耕地"             # Non-Cropland
   1: "耕地"               # Cropland (含正在耕种的一年生作物、多年生木本作物、休耕地及温室等)
-  255: "无数据"           # NoData (已屏蔽的无效区域/云层遮挡区域)
 
 segmentation:
   # 针对零碎小农田块（小至 0.5 亩 ~ 2 亩）的形态学切分参数
