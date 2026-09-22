@@ -66,7 +66,8 @@ class ParcelSegmenter:
         except Exception:
             dilated = ndimage.maximum_filter(dist, size=win)
 
-        threshold_height = max(1.5, max_dist * 0.20)
+        # 优化峰值识别高度阈值：封顶在 2.5 像元，确保中小田块均能独立激发出几何核心种子，避免被宏观大田吞噬
+        threshold_height = max(1.5, min(2.5, max_dist * 0.15))
         local_peaks = (dist == dilated) & (dist >= threshold_height) & (sub_binary_mask > 0)
 
         try:
@@ -188,14 +189,28 @@ class ParcelSegmenter:
 
                     if len(u_sub) > 1:
                         subdivided_count += 1
-                        new_sub_parcels_count += len(u_sub)
                         for idx, sub_u in enumerate(u_sub):
                             m_sub = (sub_res == sub_u)
-                            if idx == 0:
-                                sub_labeled[m_sub] = cid
-                            else:
-                                sub_labeled[m_sub] = next_label
+                            sub_size_m2 = float(np.sum(m_sub)) * self.pixel_area_m2
+                            # 若初级细分后的某子块依然显著超标 (> 3倍阈值，约2250亩)，执行二级更细颗粒度分水岭递归解构
+                            if sub_size_m2 > subdivide_threshold * 3.0:
+                                sub2_res = self._subdivide_oversized_component(m_sub.astype(np.uint8), min_peak_distance_m=60.0)
+                                u_sub2 = np.unique(sub2_res[sub2_res > 0])
+                                if len(u_sub2) > 1:
+                                    for idx2, s2 in enumerate(u_sub2):
+                                        m_s2 = (sub2_res == s2)
+                                        target_lbl = cid if (idx == 0 and idx2 == 0) else next_label
+                                        sub_labeled[m_s2] = target_lbl
+                                        if target_lbl == next_label:
+                                            next_label += 1
+                                    new_sub_parcels_count += len(u_sub2)
+                                    continue
+
+                            target_lbl = cid if idx == 0 else next_label
+                            sub_labeled[m_sub] = target_lbl
+                            if target_lbl == next_label:
                                 next_label += 1
+                            new_sub_parcels_count += 1
 
                 num_features = next_label - 1
                 if subdivided_count > 0:

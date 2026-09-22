@@ -12,6 +12,14 @@ import time
 # 确保主路径在 Python 模块检索列表中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Windows 跨平台编码防御：重置控制台标准输出编码为 utf-8 (兼容无法打印 Emoji 的 GBK 终端)
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Windows 环境下自动探测并配置 PROJ 数据路径
 try:
     import rasterio

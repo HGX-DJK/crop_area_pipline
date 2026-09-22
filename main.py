@@ -13,6 +13,15 @@
 
 import os
 import sys
+
+# Windows 跨平台编码防御：重置控制台标准输出编码为 utf-8 (兼容无法打印 Emoji 的 GBK 终端)
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import yaml
 import argparse
 import pandas as pd

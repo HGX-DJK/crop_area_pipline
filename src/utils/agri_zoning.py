@@ -123,9 +123,11 @@ def assign_province_and_zone(lon: float, lat: float) -> tuple:
     if 122.5 < lon <= 135.0 and 43.0 <= lat <= 53.5:
         return "黑龙江省", "松嫩平原寒地优质早熟小麦区"
 
-    # 区域兜底
-    if 111.0 <= lon <= 122.5 and 30.5 <= lat <= 40.5:
-        return "黄淮海平原区", "黄淮海大平原冬小麦优势带"
+    # 国际与跨境农区探测 (如中东胡齐斯坦平原、卡伦河流域等真实遥感示范区)
+    if 44.0 <= lon <= 50.0 and 29.0 <= lat <= 34.0:
+        return "胡齐斯坦灌溉平原区", "卡伦河流域甘蔗与冬小麦优质主产带"
+    elif not (73.0 <= lon <= 135.0 and 18.0 <= lat <= 54.0):
+        return "国际重点农业示范区", "全球优势农作物集约化灌溉片区"
 
     return "全国重要农区", "全国重要农作物优势聚集片区"
 
@@ -135,26 +137,27 @@ def evaluate_machinery_suitability(area_mu: float, compactness: float) -> str:
     尺度自适应农机作业适机性评估 (遵循 FAO 农业工程与高标准农田规模化机收规范)。
     
     分层判准：
-    1. 宏观特大连片产业带 (>= 10万亩): 连片跨度大、路网相连，极利于大型农机跨区机收与联合直行作业
-    2. 优势集中作业带 (5000亩 ~ 10万亩): 集中连片，规模作业效益极高
-    3. 中型适机农田 (1000亩 ~ 5000亩): 兼顾面积与轮廓规整度
-    4. 微观农田地块 (< 1000亩): 严格考察田块等周紧凑度 (防转弯掉头损耗)
+    1. 特大型规模化大田 (>= 3000亩): 集中连片，极利于大型智能重型农机直行高效作业
+    2. 集中连片标准大田 (1000亩 ~ 3000亩): 规模效益极高，适合联合收割机高效作业
+    3. 中型规整农田 (200亩 ~ 1000亩): 兼顾面积与轮廓规整度
+    4. 普通家庭适机农田 (50亩 ~ 200亩): 满足中型农机作业要求
+    5. 细碎零星小地块 (< 50亩): 适合小型农机或建议归并平整
     """
     area_mu = float(area_mu)
     compactness = float(compactness)
     
-    if area_mu >= 100000.0:
-        return "优 (超大型规模化连片作业区)"
-    elif area_mu >= 5000.0:
-        return "优 (集中连片优势作业带)"
+    if area_mu >= 3000.0:
+        return "优 (特大型规模化集中作业区)"
     elif area_mu >= 1000.0:
+        return "优 (大型连片标准农田)"
+    elif area_mu >= 200.0:
         if compactness >= 0.10:
-            return "优 (规模平整适机区)"
+            return "优 (中型规整高效适机区)"
         else:
             return "良 (中型连片作业区)"
-    elif compactness >= 0.45 and area_mu >= 5.0:
-        return "优 (规整适机)"
-    elif compactness >= 0.25 and area_mu >= 1.5:
+    elif compactness >= 0.35 and area_mu >= 30.0:
+        return "良 (标准适机田块)"
+    elif compactness >= 0.20 and area_mu >= 5.0:
         return "良 (基本适机)"
     else:
         return "中/碎 (建议并块平整)"
@@ -162,14 +165,16 @@ def evaluate_machinery_suitability(area_mu: float, compactness: float) -> str:
 
 def get_scale_tier(area_mu: float) -> str:
     """
-    根据地块面积划分规模梯队标签。
+    根据地块面积划分农业规范规模梯队标签。
     """
     area_mu = float(area_mu)
-    if area_mu >= 5000000.0:
-        return "特大型核心产业带 (>500万亩)"
-    elif area_mu >= 1000000.0:
-        return "大型集中主产区 (100~500万亩)"
-    elif area_mu >= 100000.0:
-        return "中型集中片区 (10~100万亩)"
+    if area_mu >= 3000.0:
+        return "特大型现代农业大田 (>3000亩)"
+    elif area_mu >= 1000.0:
+        return "大型规整连片田块 (1000~3000亩)"
+    elif area_mu >= 300.0:
+        return "中型标准农田单元 (300~1000亩)"
+    elif area_mu >= 50.0:
+        return "中小型家庭经营田 (50~300亩)"
     else:
-        return "规范规整农田区 (<10万亩)"
+        return "细碎零星小地块 (<50亩)"

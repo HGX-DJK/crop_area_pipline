@@ -191,14 +191,33 @@ class RasterLoader:
 
                     band_slices = []
                     if is_sdc6:
-                        # SDC30 (Dataset 26) 6波段反射率数据：提取 NDVI (Band 4: NIR, Band 3: Red)
+                        # SDC30 (Dataset 26) 6波段反射率数据：提取多光谱联合物理指数 (NDVI / MNDWI / NDBI)
+                        # 利用短波红外 SWIR1 (B5) 与绿光 Green (B2) 物理压制非农田伪影 (水体湿地、城镇建筑与裸沙荒漠)
                         for src in src_handles:
+                            b2 = src.read(2, window=win).astype(np.float32)
                             b3 = src.read(3, window=win).astype(np.float32)
                             b4 = src.read(4, window=win).astype(np.float32)
+                            b5 = src.read(5, window=win).astype(np.float32)
                             denom = b4 + b3
                             valid = denom > 0
                             ndvi = np.zeros_like(b3)
                             ndvi[valid] = (b4[valid] - b3[valid]) / denom[valid]
+
+                            # 多光谱非耕地物理掩膜：
+                            # 1. 水体与湿地沼泽：MNDWI = (Green - SWIR1)/(Green + SWIR1) > -0.08
+                            mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
+                            # 2. 城镇建筑与干旱裸沙：NDBI = (SWIR1 - NIR)/(SWIR1 + NIR) >= -0.05，或 NIR 反射率过低
+                            ndbi = (b5 - b4) / np.maximum(b5 + b4, 1e-4)
+
+                            # 水体湿地像元压制至负值
+                            is_water_wetland = (mndwi > -0.08) | ((mndwi > -0.15) & (ndvi < 0.20))
+                            ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
+
+                            # 城镇不透水面、沙漠裸岩与低植被干旱背景压制至非耕地低值 (<= 0.15)
+                            is_urban_bare = (ndbi >= -0.05) | (b4 < 1400.0)
+                            mask_low = is_urban_bare & (ndvi < 0.35)
+                            ndvi[mask_low] = np.minimum(ndvi[mask_low], 0.15)
+
                             if src.nodata is not None:
                                 ndvi[b3 == src.nodata] = np.nan
                                 ndvi[b4 == src.nodata] = np.nan
@@ -242,13 +261,19 @@ class RasterLoader:
             out_h = max(1, src.height // step)
             out_w = max(1, src.width // step)
             if is_sdc6:
-                # SDC30 物理反射率数据：提取 Band 4 (NIR) 与 Band 3 (Red) 计算真实物理 NDVI 缩略图
+                # SDC30 物理反射率数据：提取多光谱联合物理指数生成纯净缩略图
+                b2 = src.read(2, out_shape=(out_h, out_w)).astype(np.float32)
                 b3 = src.read(3, out_shape=(out_h, out_w)).astype(np.float32)
                 b4 = src.read(4, out_shape=(out_h, out_w)).astype(np.float32)
+                b5 = src.read(5, out_shape=(out_h, out_w)).astype(np.float32)
                 denom = b4 + b3
                 valid = denom > 0
                 thumbnail = np.zeros_like(b3)
                 thumbnail[valid] = (b4[valid] - b3[valid]) / denom[valid]
+                mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
+                ndbi = (b5 - b4) / np.maximum(b5 + b4, 1e-4)
+                thumbnail[mndwi > -0.08] = np.minimum(thumbnail[mndwi > -0.08], -0.05)
+                thumbnail[(ndbi >= -0.05) & (thumbnail < 0.35)] = np.minimum(thumbnail[(ndbi >= -0.05) & (thumbnail < 0.35)], 0.15)
             else:
                 band_idx = (src.count // 2 + 1) if (is_multiband and src.count > 1) else 1
                 try:
