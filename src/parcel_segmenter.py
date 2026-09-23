@@ -30,7 +30,7 @@ class ParcelSegmenter:
         self.spatial_res = self.config.get("spatial", {}).get("resolution_meters", 10.0)
         self.pixel_area_m2 = self.spatial_res * self.spatial_res  # 10m x 10m = 100 m²
 
-    def _subdivide_oversized_component(self, sub_binary_mask: np.ndarray, min_peak_distance_m: float = 120.0) -> np.ndarray:
+    def _subdivide_oversized_component(self, sub_binary_mask: np.ndarray, min_peak_distance_m: float = None) -> np.ndarray:
         """
         基于欧式距离变换与标记分水岭算法 (Distance Transform + Watershed)，
         将过度粘连的超大连片农田斑块智能切分为规整的标准化田块单元。
@@ -38,10 +38,12 @@ class ParcelSegmenter:
         
         参数：
             sub_binary_mask: 斑块局部二值掩膜 (0/1 uint8)
-            min_peak_distance_m: 识别田块几何核心的最小物理间距 (米，默认 120 米)
+            min_peak_distance_m: 识别田块几何核心的最小物理间距 (米，自适应传感器分辨率)
         返回：
             sub_labeled: 局部多边形标记矩阵 (0 为背景，1..K 为分割后的各子地块)
         """
+        if min_peak_distance_m is None:
+            min_peak_distance_m = max(180.0, float(self.spatial_res) * 5.0)
         # 局部外包矩形周围垫充 1 像素背景 0，确保距离变换正确以真实外轮廓为基准（避免边界截断伪影）
         padded_mask = np.pad(sub_binary_mask, pad_width=1, mode="constant", constant_values=0)
         try:
@@ -216,7 +218,8 @@ class ParcelSegmenter:
                             if sub_size_m2 > subdivide_threshold * 3.0:
                                 sub2_pixels = int(np.sum(m_sub))
                                 if sub2_pixels <= MAX_WATERSHED_PIXELS:
-                                    sub2_res = self._subdivide_oversized_component(m_sub.astype(np.uint8), min_peak_distance_m=60.0)
+                                    sec_dist = max(100.0, float(self.spatial_res) * 3.5)
+                                    sub2_res = self._subdivide_oversized_component(m_sub.astype(np.uint8), min_peak_distance_m=sec_dist)
                                     u_sub2 = np.unique(sub2_res[sub2_res > 0])
                                     if len(u_sub2) > 1:
                                         for idx2, s2 in enumerate(u_sub2):

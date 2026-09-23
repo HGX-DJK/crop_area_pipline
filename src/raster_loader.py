@@ -227,7 +227,16 @@ class RasterLoader:
                             # 农田即使在冬季也是红光和短波红外明显高于深山密林；森林由于水分吸收和自阴影，B3<580, B5<1800, B5/B4<0.90
                             is_forest = (ndvi > 0.45) & (b3 < 580.0) & (b5 < 1800.0) & (b5 < b4 * 0.90)
                             is_mountain_shrub = (ndvi > 0.30) & (b3 < 500.0) & (b5 < 1650.0)
-                            is_natural_forest = is_forest | is_mountain_shrub
+
+                            # 4. 借鉴 NASA Harvest: 地形起伏与空间粗糙度抑制 (Topographic Texture Constraint)
+                            # 真实农田位于平原缓坡 (内部变异极小 CV<0.15)；高起伏山地受坡向背阴与山脊沟壑切割，粗糙度显著偏高
+                            from scipy import ndimage
+                            mean_b4 = ndimage.uniform_filter(b4, size=5)
+                            sq_b4 = ndimage.uniform_filter(b4**2, size=5)
+                            cv_b4 = np.sqrt(np.maximum(sq_b4 - mean_b4**2, 0.0)) / np.maximum(mean_b4, 1.0)
+                            is_rugged_mountain = (ndvi > 0.30) & (cv_b4 > 0.28) & (b5 < 2150.0) & (b3 < 620.0)
+
+                            is_natural_forest = is_forest | is_mountain_shrub | is_rugged_mountain
 
                             # 执行非耕地物理压制：
                             # 水体湿地像元压制至负值 & LSWI 压制
@@ -369,7 +378,12 @@ class RasterLoader:
                     is_urban_bare = (ndbi >= -0.05) | (b4 < 1400.0)
                     is_forest = (ndvi > 0.45) & (b3 < 580.0) & (b5 < 1800.0) & (b5 < b4 * 0.90)
                     is_mountain_shrub = (ndvi > 0.30) & (b3 < 500.0) & (b5 < 1650.0)
-                    is_natural_forest = is_forest | is_mountain_shrub
+                    from scipy import ndimage
+                    mean_b4 = ndimage.uniform_filter(b4, size=5)
+                    sq_b4 = ndimage.uniform_filter(b4**2, size=5)
+                    cv_b4 = np.sqrt(np.maximum(sq_b4 - mean_b4**2, 0.0)) / np.maximum(mean_b4, 1.0)
+                    is_rugged_mountain = (ndvi > 0.30) & (cv_b4 > 0.28) & (b5 < 2150.0) & (b3 < 620.0)
+                    is_natural_forest = is_forest | is_mountain_shrub | is_rugged_mountain
 
                     ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
                     lswi[is_water_wetland] = np.minimum(lswi[is_water_wetland], -0.10)
