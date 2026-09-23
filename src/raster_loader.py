@@ -103,15 +103,14 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
     # 仅使用较高的纹理变异系数 (CV > 0.05) 和光谱组合（暗红光）识别山地野生植被，跨区域通用
     # 南方（如湖北）林地极度茂密且平缓，CV可能仅在 0.05-0.10，同时冠层阴影导致红光 (b3) 较低
-    # 1. 常规山区纹理过滤
-    is_rough_mountain = (ndvi > 0.30) & (cv_b4 > 0.04)
+    # 1. 明显起伏的植被（山地森林、灌木、茶园、果园等）
+    is_rough_veg = (ndvi > 0.40) & (cv_b4 > 0.035)
     
-    # 2. 茂密暗红光森林过滤 (Dark Dense Vegetation - DDV) - 放宽光谱限制，绞杀更多林地
-    is_dense_forest = (ndvi > 0.50) & (b3 < 750.0) & (b5 < 2000.0)
+    # 2. 中等起伏的暗色森林（茂密老林，冠层起伏较小，但极暗）
+    # ★ 关键修正：必须加上 cv_b4 > 0.020 的保护底线，否则会把平原地区长势极好（深绿）、冠层极度平滑的农田全部绞杀！
+    is_dense_forest = (ndvi > 0.50) & (b3 < 700.0) & (b5 < 2000.0) & (cv_b4 > 0.020)
     
-    # 3. 灌木或茶园 - 只要纹理大且绿，全部干掉，不管光谱多亮
-    is_shrub_or_tea = (ndvi > 0.40) & (cv_b4 > 0.03)
-    is_mountain_veg = is_rough_mountain | is_dense_forest | is_shrub_or_tea
+    is_mountain_veg = is_rough_veg | is_dense_forest
 
     # 执行非耕地物理压制：
     ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
