@@ -101,12 +101,27 @@ class TimeSeriesBuilder:
         # 绝对不能使用 T%2==0 作为判断依据（合成训练数据 T=8 也是偶数会被误判）
         is_dual_channel = getattr(self, "is_sdc6_dual", False)
         if is_dual_channel:
-            ts_ndvi = ts[:, 0::2]   # 偶数索引 = NDVI
-            ts_lswi = ts[:, 1::2]   # 奇数索引 = LSWI
+            if ts.shape[1] % 4 == 0:
+                ts_ndvi = ts[:, 0::4]
+                ts_lswi = ts[:, 1::4]
+                ts_gcvi = ts[:, 2::4]
+                ts_cv = ts[:, 3::4]
+            elif ts.shape[1] % 3 == 0:
+                ts_ndvi = ts[:, 0::3]
+                ts_lswi = ts[:, 1::3]
+                ts_gcvi = ts[:, 2::3]
+                ts_cv = None
+            else:
+                ts_ndvi = ts[:, 0::2]
+                ts_lswi = ts[:, 1::2]
+                ts_gcvi = None
+                ts_cv = None
             ts_for_pheno = ts_ndvi
             t_eff = ts_ndvi.shape[1]
         else:
             ts_lswi = None
+            ts_gcvi = None
+            ts_cv = None
             ts_for_pheno = ts
             t_eff = t
 
@@ -173,8 +188,23 @@ class TimeSeriesBuilder:
         else:
             lswi_feats = np.zeros((ts.shape[0], 5), dtype=np.float32)
 
+        # 6. GCVI 特征
+        if ts_gcvi is not None:
+            gcvi_max = np.max(ts_gcvi, axis=1, keepdims=True)
+            gcvi_mean = np.mean(ts_gcvi, axis=1, keepdims=True)
+            gcvi_feats = np.hstack([gcvi_max, gcvi_mean])
+        else:
+            gcvi_feats = np.zeros((ts.shape[0], 2), dtype=np.float32)
+            
+        # 7. CV 纹理特征
+        if ts_cv is not None:
+            cv_mean = np.mean(ts_cv, axis=1, keepdims=True)
+            cv_max = np.max(ts_cv, axis=1, keepdims=True)
+            cv_feats = np.hstack([cv_mean, cv_max])
+        else:
+            cv_feats = np.zeros((ts.shape[0], 2), dtype=np.float32)
+
         # 5. 组合全部特征向量：
-        # [NDVI时序(T_eff维), max, min, range, std, 梯度3维, 斜率3维, 水稻3维, LSWI统计5维]
         features = np.hstack([
             ts_for_pheno,
             ndvi_max,
@@ -190,7 +220,9 @@ class TimeSeriesBuilder:
             paddy_flooding_dip,
             paddy_rebound_surge,
             paddy_v_index,
-            lswi_feats
+            lswi_feats,
+            gcvi_feats,
+            cv_feats
         ])
 
         if is_3d:

@@ -69,7 +69,8 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
     # 1. 水体与湿地沼泽：MNDWI > -0.08，或低近红外水体吸收
     mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
-    is_water_wetland = (mndwi > -0.08) | ((mndwi > -0.15) & (ndvi < 0.20)) | ((b4 < 600.0) & (b2 > b4))
+    # ★ 保护机制：农作物极其茂盛时会大量吸收短波红外(SWIR)，导致 MNDWI 升高被误杀为水体。必须确保水体的 NDVI < 0.40！
+    is_water_wetland = ((mndwi > -0.08) & (ndvi < 0.40)) | ((mndwi > -0.15) & (ndvi < 0.20)) | ((b4 < 600.0) & (b2 > b4) & (ndvi < 0.40))
 
     # 2. 城镇建筑与不透水硬化面空间包络 (Urban Settlement Envelope):
     # 结合高亮金属/混凝土/商业屋顶 (B1 > 1000)、典型沥青/路网、NDBI 与 SWIR1/Red 平坦特征
@@ -127,7 +128,7 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
     gcvi[is_water_wetland] = np.minimum(gcvi[is_water_wetland], -0.5)
     gcvi[final_urban_mask] = np.minimum(gcvi[final_urban_mask], 0.0)
 
-    return ndvi, lswi, gcvi
+    return ndvi, lswi, gcvi, cv_b4
 
 
     def load_optical_for_slic(self, tif_dir_or_list):
@@ -323,7 +324,7 @@ class RasterLoader:
 
                             global_rows = r + np.arange(bh, dtype=np.float32)[:, np.newaxis]
                             global_cols = c + np.arange(bw, dtype=np.float32)[np.newaxis, :]
-                            ndvi, lswi, gcvi = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
+                            ndvi, lswi, gcvi, cv_b4 = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
                             if src.nodata is not None:
                                 nodata_mask = (b3 == src.nodata) | (b4 == src.nodata)
@@ -334,6 +335,7 @@ class RasterLoader:
                             band_slices.append(ndvi)
                             band_slices.append(lswi)
                             band_slices.append(gcvi)
+                            band_slices.append(cv_b4)
                     elif is_multiband and len(src_handles) == 1:
                         src = src_handles[0]
                         for b in range(1, src.count + 1):
@@ -381,7 +383,7 @@ class RasterLoader:
                 b5 = src.read(5, out_shape=(out_h, out_w)).astype(np.float32)
                 thumb_rows = np.arange(out_h, dtype=np.float32)[:, np.newaxis] * step
                 thumb_cols = np.arange(out_w, dtype=np.float32)[np.newaxis, :] * step
-                thumbnail, _, _ = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, thumb_rows, thumb_cols)
+                thumbnail, _, _, _ = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, thumb_rows, thumb_cols)
             else:
                 band_idx = (src.count // 2 + 1) if (is_multiband and src.count > 1) else 1
                 try:
@@ -433,7 +435,7 @@ class RasterLoader:
                     b4 = src.read(4).astype(np.float32)
                     b5 = src.read(5).astype(np.float32)
 
-                    ndvi, lswi, gcvi = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
+                    ndvi, lswi, gcvi, cv_b4 = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
                     if src.nodata is not None:
                         nodata_mask = (b3 == src.nodata) | (b4 == src.nodata)
