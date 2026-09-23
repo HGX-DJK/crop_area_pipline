@@ -201,8 +201,11 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
     logger.info("[步骤 3/5] 执行形态学边缘腐蚀与狭窄田埂切分（切分零碎小田块）...")
+    edge_mask = None
+    if input_mode == "geotiff" and sorted_files:
+        edge_mask = loader.compute_spectral_edge_mask(sorted_files[0], crop_mask)
     segmenter = ParcelSegmenter(config)
-    parcel_id_mask, parcel_metadata = segmenter.segment_parcels(crop_mask, conf_map)
+    parcel_id_mask, parcel_metadata = segmenter.segment_parcels(crop_mask, conf_map, edge_mask=edge_mask)
     total_valid_parcels = len(parcel_metadata)
     total_cultivated_mu = sum(p["area_mu"] for p in parcel_metadata)
     logger.info(f"  -> 成功勾勒并分离 {total_valid_parcels} 个独立农田地块，累计净耕地面积: {total_cultivated_mu:.1f} 亩。")

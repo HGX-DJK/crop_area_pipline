@@ -102,7 +102,8 @@ class CropClassifier:
             # 自适应特征时序维度对齐
             is_short_span = (doy_list is not None and len(doy_list) > 1 and (max(doy_list) - min(doy_list) <= 15))
             is_winter_snapshot = (doy_list is not None and len(doy_list) > 0 and max(doy_list) <= 60)
-            self.veg_threshold = 0.28 if (target_t == 1 or is_short_span or is_winter_snapshot) else 0.18
+            # 植被初筛硬门槛：放宽至 0.18，确保冬季翻耕待播农田与低植被覆盖休耕地顺利纳统
+            self.veg_threshold = 0.18
 
             if target_t is not None and target_t == raw_ts.shape[1] and sample_doys == doy_list:
                 # 样本与输入影像的时相 DOY 完全对齐，直接使用真实实测样本数据！
