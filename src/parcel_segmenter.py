@@ -134,7 +134,7 @@ class ParcelSegmenter:
                 n_segments = int((rows * cols) / pixels_per_sp)
                 n_segments = min(max(n_segments, 1000), 500000)
                 
-                segments_slic = slic(optical_image, n_segments=n_segments, compactness=20, sigma=1, start_label=1)
+                segments_slic = slic(optical_image, n_segments=n_segments, compactness=5, sigma=1, start_label=1)
                 self.logger.info(f"  [OBIA] SLIC 生成了 {len(np.unique(segments_slic))} 个超像素碎片。正在与预测掩膜进行深度融合...")
                 
                 flat_segments = segments_slic.ravel()
@@ -149,7 +149,8 @@ class ParcelSegmenter:
                 with np.errstate(divide='ignore', invalid='ignore'):
                     crop_ratio = sp_crops / sp_totals
                 
-                is_sp_crop = crop_ratio > 0.5
+                # 提高融合门槛：超像素内必须有 75% 以上被预测为耕地，才判定为耕地，防止边缘溢出到林地
+                is_sp_crop = crop_ratio > 0.75
                 if len(is_sp_crop) > 0:
                     is_sp_crop[0] = False
                 

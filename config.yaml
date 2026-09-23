@@ -34,7 +34,7 @@ segmentation:
   fill_internal_holes: true    # 是否闭合田块内部孤立的微小车辙与像元阴影空洞
   smooth_boundaries: true      # 是否开启 Chaikin 拐角切割拓扑平滑（消除栅格阶梯锯齿）
   subdivide_oversized: true    # 是否开启超大连片农田智能分水岭切分（基于距离变换核心种子切分粘连大田）
-  min_parcel_area_m2: 3600.0    # 最小合法地块面积阈值（30m 分辨率下约 4 像元 ≈ 5.4 亩，有效过滤椒盐噪声斑）
+  min_parcel_area_m2: 20000.0   # 最小合法地块面积阈值（约 30 亩，有效过滤山区孤立的超像素圆形假斑块）
   max_parcel_area_m2: 800000.0  # 触发智能细分的单块面积阈值（80 公顷 ≈ 1200 亩，保持规整农场完整性）
   discard_oversized: false      # 是否丢弃超过上限的斑块（保留超大集中连片农田）
   max_export_parcels: 3000      # 矢量化导出的主力核心地块上限（扩大至 3000 块，让平原农田大面积饱满呈现）
