@@ -133,6 +133,11 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
             if "crs" in geo_info:
                 config.setdefault("spatial", {})["crs"] = geo_info["crs"]
             res_desc = f"{geo_info['resolution_x']:.5f} 度 (约 {spatial_res:.1f} 米)" if geo_info.get("is_geographic") else f"{spatial_res:.2f} 米"
+            # 将 SDC6 双通道标志同步给 ts_builder，确保推断时正确拆分 NDVI+LSWI 通道
+            if geo_info.get("is_sdc6", False):
+                ts_builder.is_sdc6_dual = True
+                logger.info("  -> 已同步 SDC6 双通道标志至特征提取器 (NDVI+LSWI 双通道推断模式激活)。")
+
             logger.info(f"  -> 自动对齐影像空间参考 (CRS: {geo_info['crs']}，空间分辨率: {res_desc})，尺寸: {geo_info['height']} 行 × {geo_info['width']} 列，覆盖 {len(doy_list)} 个生长时相。")
 
         total_pixels = geo_info["height"] * geo_info["width"]
@@ -142,12 +147,16 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
         classifier = CropClassifier(config)
 
+        # SDC6 双通道模式：每景产生 NDVI+LSWI 两通道；训练时 target_t = n_dates（文件数），
+        # 与推断侧 extract_phenological_features 中 t_eff=n_dates 保持一致，避免特征维度错位
+        n_dates = len(doy_list)
         classifier.train_with_samples(
             config.get("paths", {}).get("training_samples", "data/sample_training_points.csv"),
             ts_builder=ts_builder,
-            target_t=len(doy_list),
+            target_t=n_dates,
             doy_list=doy_list
         )
+
 
         if use_streaming:
             logger.info(f"  -> 影像像元规模达 {total_pixels:,} (超 400 万) 或开启流式，自动启用磁盘纯外核滑动窗口流式推断 (块大小: {block_size}×{block_size})，避免大图内存峰值...")

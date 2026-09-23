@@ -191,37 +191,65 @@ class RasterLoader:
 
                     band_slices = []
                     if is_sdc6:
-                        # SDC30 (Dataset 26) 6波段反射率数据：提取多光谱联合物理指数 (NDVI / MNDWI / NDBI)
-                        # 利用短波红外 SWIR1 (B5) 与绿光 Green (B2) 物理压制非农田伪影 (水体湿地、城镇建筑与裸沙荒漠)
+                        # SDC30 (Dataset 26) 6波段反射率数据：提取多光谱联合物理指数 (NDVI + LSWI)
+                        # NDVI=(NIR-Red)/(NIR+Red)  物候绿度判别
+                        # LSWI=(NIR-SWIR1)/(NIR+SWIR1)  土壤水分/作物冠层含水量判别
+                        # 利用 MNDWI/NDBI 辅助抑制非农田伪影 (水体湿地、城镇建筑与裸沙荒漠)
                         for src in src_handles:
                             b2 = src.read(2, window=win).astype(np.float32)
                             b3 = src.read(3, window=win).astype(np.float32)
                             b4 = src.read(4, window=win).astype(np.float32)
                             b5 = src.read(5, window=win).astype(np.float32)
-                            denom = b4 + b3
-                            valid = denom > 0
+
+                            # --- NDVI 计算 ---
+                            denom_ndvi = b4 + b3
                             ndvi = np.zeros_like(b3)
-                            ndvi[valid] = (b4[valid] - b3[valid]) / denom[valid]
+                            valid_ndvi = denom_ndvi > 0
+                            ndvi[valid_ndvi] = (b4[valid_ndvi] - b3[valid_ndvi]) / denom_ndvi[valid_ndvi]
+
+                            # --- LSWI 计算 (地表水分指数：区分休耕湿润农田 vs 干燥荒漠) ---
+                            # 农田休耕熟土 LSWI ≈ +0.002，荒漠干沙 LSWI ≈ -0.05，活跃作物 LSWI ≈ +0.19
+                            denom_lswi = b4 + b5
+                            lswi = np.zeros_like(b4)
+                            valid_lswi = denom_lswi > 0
+                            lswi[valid_lswi] = (b4[valid_lswi] - b5[valid_lswi]) / denom_lswi[valid_lswi]
 
                             # 多光谱非耕地物理掩膜：
-                            # 1. 水体与湿地沼泽：MNDWI = (Green - SWIR1)/(Green + SWIR1) > -0.08
+                            # 1. 水体与湿地沼泽：MNDWI = (Green - SWIR1)/(Green + SWIR1) > -0.08，或近红外极低
                             mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
+                            is_water_wetland = (mndwi > -0.08) | ((mndwi > -0.15) & (ndvi < 0.20)) | ((b4 < 600.0) & (b2 > b4))
+
                             # 2. 城镇建筑与干旱裸沙：NDBI = (SWIR1 - NIR)/(SWIR1 + NIR) >= -0.05，或 NIR 反射率过低
                             ndbi = (b5 - b4) / np.maximum(b5 + b4, 1e-4)
+                            is_urban_bare = (ndbi >= -0.05) | (b4 < 1400.0)
 
-                            # 水体湿地像元压制至负值
-                            is_water_wetland = (mndwi > -0.08) | ((mndwi > -0.15) & (ndvi < 0.20))
+                            # 3. 自然山地密林、山地常绿灌丛与深色林冠 (多层树冠强吸收，红光极低、短波红外极低、高绿度)：
+                            # 农田即使在冬季也是红光和短波红外明显高于深山密林；森林由于水分吸收和自阴影，B3<580, B5<1800, B5/B4<0.90
+                            is_forest = (ndvi > 0.45) & (b3 < 580.0) & (b5 < 1800.0) & (b5 < b4 * 0.90)
+                            is_mountain_shrub = (ndvi > 0.30) & (b3 < 500.0) & (b5 < 1650.0)
+                            is_natural_forest = is_forest | is_mountain_shrub
+
+                            # 执行非耕地物理压制：
+                            # 水体湿地像元压制至负值 & LSWI 压制
                             ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
+                            lswi[is_water_wetland] = np.minimum(lswi[is_water_wetland], -0.10)
 
                             # 城镇不透水面、沙漠裸岩与低植被干旱背景压制至非耕地低值 (<= 0.15)
-                            is_urban_bare = (ndbi >= -0.05) | (b4 < 1400.0)
                             mask_low = is_urban_bare & (ndvi < 0.35)
                             ndvi[mask_low] = np.minimum(ndvi[mask_low], 0.15)
 
+                            # 自然山地密林与山体灌丛压制至非耕地低值 (<= 0.12)，彻底剔除山地伪耕地
+                            ndvi[is_natural_forest] = np.minimum(ndvi[is_natural_forest], 0.12)
+                            lswi[is_natural_forest] = np.minimum(lswi[is_natural_forest], -0.05)
+
                             if src.nodata is not None:
-                                ndvi[b3 == src.nodata] = np.nan
-                                ndvi[b4 == src.nodata] = np.nan
+                                nodata_mask = (b3 == src.nodata) | (b4 == src.nodata)
+                                ndvi[nodata_mask] = np.nan
+                                lswi[nodata_mask] = np.nan
+
+                            # 双通道输出：时间步内同时记录 NDVI 和 LSWI
                             band_slices.append(ndvi)
+                            band_slices.append(lswi)
                     elif is_multiband and len(src_handles) == 1:
                         src = src_handles[0]
                         for b in range(1, src.count + 1):
@@ -313,18 +341,50 @@ class RasterLoader:
         raster_cube = np.empty((h, w, total_t), dtype=np.float32)
 
         if is_sdc6:
+            # SDC30 双通道：为每景影像同时提取 NDVI + LSWI，形状 (H, W, N_files*2)
+            raster_cube = np.empty((h, w, total_t * 2), dtype=np.float32)
             for idx, tif_path in enumerate(sorted_files):
                 with rasterio.open(tif_path) as src:
+                    b2 = src.read(2).astype(np.float32)
                     b3 = src.read(3).astype(np.float32)
                     b4 = src.read(4).astype(np.float32)
-                    denom = b4 + b3
-                    valid = denom > 0
+                    b5 = src.read(5).astype(np.float32)
+
+                    # NDVI
+                    denom_ndvi = b4 + b3
                     ndvi = np.zeros_like(b3)
-                    ndvi[valid] = (b4[valid] - b3[valid]) / denom[valid]
+                    valid_ndvi = denom_ndvi > 0
+                    ndvi[valid_ndvi] = (b4[valid_ndvi] - b3[valid_ndvi]) / denom_ndvi[valid_ndvi]
+
+                    # LSWI
+                    denom_lswi = b4 + b5
+                    lswi = np.zeros_like(b4)
+                    valid_lswi = denom_lswi > 0
+                    lswi[valid_lswi] = (b4[valid_lswi] - b5[valid_lswi]) / denom_lswi[valid_lswi]
+
+                    # 物理非耕地掩膜
+                    mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
+                    is_water_wetland = (mndwi > -0.08) | ((mndwi > -0.15) & (ndvi < 0.20)) | ((b4 < 600.0) & (b2 > b4))
+                    ndbi = (b5 - b4) / np.maximum(b5 + b4, 1e-4)
+                    is_urban_bare = (ndbi >= -0.05) | (b4 < 1400.0)
+                    is_forest = (ndvi > 0.45) & (b3 < 580.0) & (b5 < 1800.0) & (b5 < b4 * 0.90)
+                    is_mountain_shrub = (ndvi > 0.30) & (b3 < 500.0) & (b5 < 1650.0)
+                    is_natural_forest = is_forest | is_mountain_shrub
+
+                    ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
+                    lswi[is_water_wetland] = np.minimum(lswi[is_water_wetland], -0.10)
+                    mask_low = is_urban_bare & (ndvi < 0.35)
+                    ndvi[mask_low] = np.minimum(ndvi[mask_low], 0.15)
+                    ndvi[is_natural_forest] = np.minimum(ndvi[is_natural_forest], 0.12)
+                    lswi[is_natural_forest] = np.minimum(lswi[is_natural_forest], -0.05)
+
                     if src.nodata is not None:
-                        ndvi[b3 == src.nodata] = np.nan
-                        ndvi[b4 == src.nodata] = np.nan
-                    raster_cube[:, :, idx] = ndvi
+                        nodata_mask = (b3 == src.nodata) | (b4 == src.nodata)
+                        ndvi[nodata_mask] = np.nan
+                        lswi[nodata_mask] = np.nan
+
+                    raster_cube[:, :, idx * 2] = ndvi
+                    raster_cube[:, :, idx * 2 + 1] = lswi
         elif is_multiband and len(sorted_files) == 1:
             with rasterio.open(sorted_files[0]) as src:
                 self.logger.info(f"  -> 检测到单景多波段影像，包含 {src.count} 个波段，按时序多波段提取...")

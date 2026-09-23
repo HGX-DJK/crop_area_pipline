@@ -17,6 +17,9 @@ class TimeSeriesBuilder:
         self.spatial_cfg = self.config.get("spatial", {})
         self.resolution = self.spatial_cfg.get("resolution_meters", 10.0)
         self.doy_list = [80, 110, 140, 170, 200, 230, 260, 290]
+        # 显式双通道标志：仅由 raster_loader 在确认 SDC6 数据时设为 True
+        # 避免用 T%2==0 误判合成训练数据（T=8 也是偶数）
+        self.is_sdc6_dual = False
 
     def smooth_time_series(self, ts, method="savgol"):
         """
@@ -65,9 +68,10 @@ class TimeSeriesBuilder:
 
     def extract_phenological_features(self, time_series_array):
         """
-        从多时相 NDVI/EVI 序列中提炼物候指纹特征。
+        从多时相 NDVI/LSWI 序列中提炼物候指纹特征。
         参数：
-            time_series_array: 形状为 (N, T) 或 (Height, Width, T) 的时序植被指数矩阵
+            time_series_array: 形状为 (N, T) 或 (Height, Width, T) 的时序植被指数矩阵。
+            SDC30 双通道模式：T 为偶数时，偶数列 = NDVI，奇数列 = LSWI（自动识别）。
         返回：
             feature_matrix: 融合了多时相原始值与提取物候因子的特征矩阵
         """
@@ -93,19 +97,32 @@ class TimeSeriesBuilder:
         if val_max > 10.0:
             ts = ts / 10000.0
 
+        # --- SDC30 双通道拆分：由 raster_loader 在加载 SDC6 数据时显式设置 is_sdc6_dual=True ---
+        # 绝对不能使用 T%2==0 作为判断依据（合成训练数据 T=8 也是偶数会被误判）
+        is_dual_channel = getattr(self, "is_sdc6_dual", False)
+        if is_dual_channel:
+            ts_ndvi = ts[:, 0::2]   # 偶数索引 = NDVI
+            ts_lswi = ts[:, 1::2]   # 奇数索引 = LSWI
+            ts_for_pheno = ts_ndvi
+            t_eff = ts_ndvi.shape[1]
+        else:
+            ts_lswi = None
+            ts_for_pheno = ts
+            t_eff = t
+
         # 可选：时序去云抗噪平滑滤波（依据联合国手册 SITS 标准）
         if self.config.get("preprocessing", {}).get("apply_temporal_smoothing", False):
-            ts = self.smooth_time_series(ts)
+            ts_for_pheno = self.smooth_time_series(ts_for_pheno)
 
-        # 1. 基础极值与波动统计
-        ndvi_max = np.max(ts, axis=1, keepdims=True)
-        ndvi_min = np.min(ts, axis=1, keepdims=True)
+        # 1. 基础极值与波动统计（基于 NDVI）
+        ndvi_max = np.max(ts_for_pheno, axis=1, keepdims=True)
+        ndvi_min = np.min(ts_for_pheno, axis=1, keepdims=True)
         ndvi_range = ndvi_max - ndvi_min
-        ndvi_std = np.std(ts, axis=1, keepdims=True)
+        ndvi_std = np.std(ts_for_pheno, axis=1, keepdims=True)
 
         # 2. 自适应计算时序动态梯度与物候斜率（动态适配任意时相数 T >= 2，杜绝固定索引硬编码）
-        if t >= 2:
-            grad = np.gradient(ts, axis=1)
+        if t_eff >= 2:
+            grad = np.gradient(ts_for_pheno, axis=1)
             grad_max = np.max(grad, axis=1, keepdims=True)   # 最大暴发增长率（拔节/抽穗）
             grad_min = np.min(grad, axis=1, keepdims=True)   # 最大衰退下降率（成熟/收割）
             grad_mean = np.mean(np.abs(grad), axis=1, keepdims=True)  # 生长季活跃度
@@ -115,31 +132,25 @@ class TimeSeriesBuilder:
             grad_mean = np.zeros((ts.shape[0], 1), dtype=np.float32)
 
         # 自适应关键物候阶段差分斜率（划分为苗期增长、旺盛期、成熟衰落期）
-        if t >= 4:
-            i_early = max(1, t // 4)
-            i_mid = max(i_early + 1, t // 2)
-            i_late = min(t - 1, (3 * t) // 4)
-            early_slope = (ts[:, [i_early]] - ts[:, [0]]) / max(1.0, float(i_early))
-            mid_slope = (ts[:, [i_late]] - ts[:, [i_mid]]) / max(1.0, float(i_late - i_mid))
-            late_drop = (ts[:, [-1]] - ts[:, [i_late]]) / max(1.0, float(t - 1 - i_late))
+        if t_eff >= 4:
+            i_early = max(1, t_eff // 4)
+            i_mid = max(i_early + 1, t_eff // 2)
+            i_late = min(t_eff - 1, (3 * t_eff) // 4)
+            early_slope = (ts_for_pheno[:, [i_early]] - ts_for_pheno[:, [0]]) / max(1.0, float(i_early))
+            mid_slope = (ts_for_pheno[:, [i_late]] - ts_for_pheno[:, [i_mid]]) / max(1.0, float(i_late - i_mid))
+            late_drop = (ts_for_pheno[:, [-1]] - ts_for_pheno[:, [i_late]]) / max(1.0, float(t_eff - 1 - i_late))
         else:
-            early_slope = (ts[:, [-1]] - ts[:, [0]]) / max(1.0, float(t - 1)) if t > 1 else np.zeros_like(ndvi_max)
+            early_slope = (ts_for_pheno[:, [-1]] - ts_for_pheno[:, [0]]) / max(1.0, float(t_eff - 1)) if t_eff > 1 else np.zeros_like(ndvi_max)
             mid_slope = np.zeros_like(early_slope)
             late_drop = np.zeros_like(early_slope)
 
         # 3. 针对水稻（Paddy Rice）的轻量水分与泡田期物候增强特征 (Flooding & Transplanting Signals)
-        # 水稻核心物理指纹：在生长前期（5-6月插秧期）存在蓄水泡田导致的光谱低谷（近水体吸收特征），
-        # 随后分蘖拔节期产生极陡峭跃升（拔节暴升）。旱地作物（玉米/大豆/棉花）在播种出苗期无泡田淹水陷阱。
-        if t >= 3:
-            early_bound = max(2, (t + 1) // 2)
-            early_min = np.min(ts[:, :early_bound], axis=1, keepdims=True)
-            # 特征 1：泡田期特征低值下陷深度 (Flooding Dip Depth)
-            paddy_flooding_dip = np.maximum(0.0, ts[:, [0]] - early_min)
-            # 特征 2：移栽后冠层爆发式跃变跨度 (Post-Transplanting Rebound Surge)
+        if t_eff >= 3:
+            early_bound = max(2, (t_eff + 1) // 2)
+            early_min = np.min(ts_for_pheno[:, :early_bound], axis=1, keepdims=True)
+            paddy_flooding_dip = np.maximum(0.0, ts_for_pheno[:, [0]] - early_min)
             paddy_rebound_surge = np.maximum(0.0, ndvi_max - early_min)
-            # 特征 3：水稻特征 V 形物候淹水指纹指数 (V-Transplanting Signal)
-            # 防御性分母数值保护：遥感水体/阴影等负 NDVI 像元在 +0.05 后可能为 0 或负数，执行安全下限截断
-            denom_dip = np.where(ts[:, [0]] + 0.05 > 0.02, ts[:, [0]] + 0.05, 0.05)
+            denom_dip = np.where(ts_for_pheno[:, [0]] + 0.05 > 0.02, ts_for_pheno[:, [0]] + 0.05, 0.05)
             denom_surge = np.where(ndvi_max + 0.05 > 0.02, ndvi_max + 0.05, 0.05)
             paddy_v_index = (paddy_flooding_dip / denom_dip) * (paddy_rebound_surge / denom_surge)
             paddy_v_index = np.nan_to_num(paddy_v_index, nan=0.0, posinf=0.0, neginf=0.0)
@@ -148,9 +159,24 @@ class TimeSeriesBuilder:
             paddy_rebound_surge = np.zeros_like(ndvi_max)
             paddy_v_index = np.zeros_like(ndvi_max)
 
-        # 4. 组合全部特征向量：[原始全部时相NDVI, max, min, range, std, 动态梯度3维, 阶段斜率3维, 水稻泡田水分3维]
+        # 4. LSWI 附加特征（SDC30 双通道模式：5维）
+        # 荒漠干沙 LSWI≈-0.05 / 休耕农田 LSWI≈+0.002 / 活跃作物 LSWI≈+0.19
+        # 补充 NDVI 在荒漠-农田边界的模糊区域判别力
+        if ts_lswi is not None:
+            lswi_max  = np.max(ts_lswi, axis=1, keepdims=True)
+            lswi_min  = np.min(ts_lswi, axis=1, keepdims=True)
+            lswi_mean = np.mean(ts_lswi, axis=1, keepdims=True)
+            lswi_std  = np.std(ts_lswi, axis=1, keepdims=True)
+            # LSWI-NDVI 差值：同向升高=活跃有水分作物，分歧=背景/稀疏植被
+            lswi_ndvi_diff = lswi_mean - np.mean(ts_for_pheno, axis=1, keepdims=True)
+            lswi_feats = np.hstack([lswi_max, lswi_min, lswi_mean, lswi_std, lswi_ndvi_diff])
+        else:
+            lswi_feats = np.zeros((ts.shape[0], 5), dtype=np.float32)
+
+        # 5. 组合全部特征向量：
+        # [NDVI时序(T_eff维), max, min, range, std, 梯度3维, 斜率3维, 水稻3维, LSWI统计5维]
         features = np.hstack([
-            ts,
+            ts_for_pheno,
             ndvi_max,
             ndvi_min,
             ndvi_range,
@@ -163,7 +189,8 @@ class TimeSeriesBuilder:
             late_drop,
             paddy_flooding_dip,
             paddy_rebound_surge,
-            paddy_v_index
+            paddy_v_index,
+            lswi_feats
         ])
 
         if is_3d:

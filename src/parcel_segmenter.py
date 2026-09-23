@@ -177,12 +177,32 @@ class ParcelSegmenter:
                 subdivided_count = 0
                 new_sub_parcels_count = 0
 
-                for cid in oversized_cids:
+                # 分水岭逐斑块切分（带进度打印，避免无响应假象）
+                # 极大斑块保护阈值：超过此像素数的斑块跳过分水岭（防止单块内存暴增）
+                MAX_WATERSHED_PIXELS = 500_000  # ~4500 亩 @ 30m 分辨率
+
+                for loop_idx, cid in enumerate(oversized_cids):
+                    # 每 10 个斑块打印一次进度
+                    if loop_idx % 10 == 0 or loop_idx == len(oversized_cids) - 1:
+                        self.logger.info(
+                            f"  -> 分水岭切分进度: {loop_idx + 1}/{len(oversized_cids)} 块 "
+                            f"({(loop_idx + 1) / len(oversized_cids) * 100:.0f}%)..."
+                        )
+
                     sl = slices[cid - 1]
                     if sl is None:
                         continue
                     sub_labeled = labeled_array[sl]
                     local_mask = (sub_labeled == cid).astype(np.uint8)
+
+                    # 极大斑块保护：单块像元数超过阈值时跳过分水岭，直接保留原始标签
+                    blob_pixels = int(np.sum(local_mask))
+                    if blob_pixels > MAX_WATERSHED_PIXELS:
+                        self.logger.debug(
+                            f"  -> 斑块 #{cid} 过大 ({blob_pixels} 像元)，跳过分水岭直接保留。"
+                        )
+                        new_sub_parcels_count += 1
+                        continue
 
                     sub_res = self._subdivide_oversized_component(local_mask)
                     u_sub = np.unique(sub_res[sub_res > 0])
@@ -192,19 +212,21 @@ class ParcelSegmenter:
                         for idx, sub_u in enumerate(u_sub):
                             m_sub = (sub_res == sub_u)
                             sub_size_m2 = float(np.sum(m_sub)) * self.pixel_area_m2
-                            # 若初级细分后的某子块依然显著超标 (> 3倍阈值，约2250亩)，执行二级更细颗粒度分水岭递归解构
+                            # 若初级细分后的某子块依然显著超标 (> 3倍阈值)，执行二级更细颗粒度分水岭递归解构
                             if sub_size_m2 > subdivide_threshold * 3.0:
-                                sub2_res = self._subdivide_oversized_component(m_sub.astype(np.uint8), min_peak_distance_m=60.0)
-                                u_sub2 = np.unique(sub2_res[sub2_res > 0])
-                                if len(u_sub2) > 1:
-                                    for idx2, s2 in enumerate(u_sub2):
-                                        m_s2 = (sub2_res == s2)
-                                        target_lbl = cid if (idx == 0 and idx2 == 0) else next_label
-                                        sub_labeled[m_s2] = target_lbl
-                                        if target_lbl == next_label:
-                                            next_label += 1
-                                    new_sub_parcels_count += len(u_sub2)
-                                    continue
+                                sub2_pixels = int(np.sum(m_sub))
+                                if sub2_pixels <= MAX_WATERSHED_PIXELS:
+                                    sub2_res = self._subdivide_oversized_component(m_sub.astype(np.uint8), min_peak_distance_m=60.0)
+                                    u_sub2 = np.unique(sub2_res[sub2_res > 0])
+                                    if len(u_sub2) > 1:
+                                        for idx2, s2 in enumerate(u_sub2):
+                                            m_s2 = (sub2_res == s2)
+                                            target_lbl = cid if (idx == 0 and idx2 == 0) else next_label
+                                            sub_labeled[m_s2] = target_lbl
+                                            if target_lbl == next_label:
+                                                next_label += 1
+                                        new_sub_parcels_count += len(u_sub2)
+                                        continue
 
                             target_lbl = cid if idx == 0 else next_label
                             sub_labeled[m_sub] = target_lbl
