@@ -37,7 +37,29 @@ class CropClassifier:
         self.metrics = {}
 
     def _init_model(self):
-        if self.model_type == "gradient_boosting":
+        if self.model_type == "xgboost":
+            try:
+                import xgboost as xgb
+                return xgb.XGBClassifier(
+                    n_estimators=self.n_estimators,
+                    max_depth=min(self.max_depth, 8),
+                    learning_rate=0.1,
+                    tree_method="hist",
+                    random_state=self.random_state,
+                    n_jobs=self.n_jobs,
+                    eval_metric="logloss"
+                )
+            except Exception as e:
+                self.logger.warning(f"XGBoost 初始化失败 ({e})，自动回退至 RandomForest。")
+                self.model_type = "random_forest"
+                return RandomForestClassifier(
+                    n_estimators=self.n_estimators,
+                    max_depth=self.max_depth,
+                    random_state=self.random_state,
+                    class_weight="balanced",
+                    n_jobs=self.n_jobs
+                )
+        elif self.model_type == "gradient_boosting":
             return GradientBoostingClassifier(
                 n_estimators=self.n_estimators,
                 max_depth=min(self.max_depth, 6),
@@ -82,7 +104,11 @@ class CropClassifier:
             is_winter_snapshot = (doy_list is not None and len(doy_list) > 0 and max(doy_list) <= 60)
             self.veg_threshold = 0.28 if (target_t == 1 or is_short_span or is_winter_snapshot) else 0.18
 
-            if target_t is not None and (target_t != raw_ts.shape[1] or is_short_span or is_winter_snapshot):
+            if target_t is not None and target_t == raw_ts.shape[1] and sample_doys == doy_list:
+                # 样本与输入影像的时相 DOY 完全对齐，直接使用真实实测样本数据！
+                self.logger.info(f"  -> 标定样本时相 ({sample_doys}) 与输入影像完全对齐，启用 100% 真实地面标定特征空间！")
+                ts_values = raw_ts.astype(np.float32)
+            elif target_t is not None and (target_t != raw_ts.shape[1] or is_short_span or is_winter_snapshot):
                 self.logger.info(f"输入影像时相数 (T={target_t}) 与标定样本基准 (T={raw_ts.shape[1]}) 不同，正在执行自适应对齐...")
                 if target_t == 1 or is_short_span or is_winter_snapshot:
                     cur_doy = doy_list[0] if (doy_list and len(doy_list) > 0) else 150
