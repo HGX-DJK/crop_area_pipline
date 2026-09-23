@@ -88,14 +88,16 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
             large_urban[lbl_u == i] = True
     final_urban_mask = ndimage.binary_dilation(large_urban, structure=np.ones((7, 7)))
 
-    # 3. 空间地理区隔与地形粗糙度协同压制（消除西侧海岸山脉/贝里埃萨湖野生林木，保护东侧平原农田果园）：
-    foothill_col = 2850.0 - 0.06 * global_rows
+    # 3. 基于泛化纹理特征的地形粗糙度压制（消除野生林木/山地，保护平原农田）：
+    # 摒弃写死的区域空间坐标 (已移除 foothill_col / global_cols 限制)，改用纯粹的数据驱动方法。
+    # 山坡林地通常在近红外 (Band 4) 有更强的阴阳坡起伏纹理，而农田平整均一。
     mean_b4 = ndimage.uniform_filter(b4, size=11)
     sq_b4 = ndimage.uniform_filter(b4**2, size=11)
     cv_b4 = np.sqrt(np.maximum(sq_b4 - mean_b4**2, 0.0)) / np.maximum(mean_b4, 1.0)
 
-    is_west_zone = global_cols < foothill_col
-    is_mountain_veg = is_west_zone & (ndvi > 0.20) & ((global_cols < 2600.0) | (cv_b4 > 0.08) | (b5 < 2300.0))
+    # 仅使用较高的纹理变异系数 (CV > 0.05) 和光谱组合（暗红光）识别山地野生植被，跨区域通用
+    # 南方（如湖北）林地极度茂密且平缓，CV可能仅在 0.05-0.10，同时冠层阴影导致红光 (b3) 较低
+    is_mountain_veg = (ndvi > 0.30) & (cv_b4 > 0.05) & (b3 < 900.0) & (b5 < 2600.0)
 
     # 执行非耕地物理压制：
     ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
