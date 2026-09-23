@@ -44,6 +44,8 @@ class CropClassifier:
                     n_estimators=self.n_estimators,
                     max_depth=min(self.max_depth, 8),
                     learning_rate=0.1,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
                     tree_method="hist",
                     random_state=self.random_state,
                     n_jobs=self.n_jobs,
@@ -122,8 +124,8 @@ class CropClassifier:
                             vals = row[doy_cols].values.astype(np.float32)
                             if c_label == 0:
                                 base_v = float(np.mean(vals[:max(1, min(len(vals), 3))]))
-                                if base_v > 0.26:
-                                    base_v = np.random.uniform(0.12, 0.22)
+                                # 【优化】：删除了强制压低林地绿度的 Bug 逻辑 (if base_v > 0.26)
+                                # 让模型真正学会遇到高 NDVI 时去观察 LSWI 或时序振幅，而不是盲目判断
                             else:
                                 base_v = float(np.max(vals))
                                 if base_v < 0.40:
@@ -148,6 +150,7 @@ class CropClassifier:
                 ts_values = raw_ts
 
             self.target_t = target_t if target_t is not None else raw_ts.shape[1]
+            
             # 训练样本的 ts_values 是纯 NDVI 矩阵（无 LSWI 通道）
             # 必须临时关闭双通道标志，使提取的特征维度与推断侧（t_eff = n_dates，LSWI 为零填充）一致
             _dual_backup = getattr(ts_builder, "is_sdc6_dual", False)

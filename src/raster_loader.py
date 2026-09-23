@@ -97,7 +97,15 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
     # 仅使用较高的纹理变异系数 (CV > 0.05) 和光谱组合（暗红光）识别山地野生植被，跨区域通用
     # 南方（如湖北）林地极度茂密且平缓，CV可能仅在 0.05-0.10，同时冠层阴影导致红光 (b3) 较低
-    is_mountain_veg = (ndvi > 0.30) & (cv_b4 > 0.05) & (b3 < 900.0) & (b5 < 2600.0)
+    # 1. 常规山区纹理过滤 (CV > 0.05 + 阴影红光较低)
+    is_rough_mountain = (ndvi > 0.30) & (cv_b4 > 0.05) & (b3 < 900.0) & (b5 < 2600.0)
+    
+    # 2. 茂密暗红光森林过滤 (Dark Dense Vegetation - DDV)
+    # 南方平缓山坡上的茂密森林，冠层极度平滑导致 CV < 0.05，但对红光和短波红外吸收极强
+    is_dense_forest = (ndvi > 0.55) & (b3 < 550.0) & (b5 < 1600.0)
+    
+    is_shrub_or_tea = (ndvi > 0.45) & (cv_b4 > 0.035) & (b3 < 1000.0) & (b5 < 2400.0)
+    is_mountain_veg = is_rough_mountain | is_dense_forest | is_shrub_or_tea
 
     # 执行非耕地物理压制：
     ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
