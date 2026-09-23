@@ -151,13 +151,21 @@ class CropClassifier:
 
             self.target_t = target_t if target_t is not None else raw_ts.shape[1]
             
-            # 训练样本的 ts_values 是纯 NDVI 矩阵（无 LSWI 通道）
-            # 必须临时关闭双通道标志，使提取的特征维度与推断侧（t_eff = n_dates，LSWI 为零填充）一致
-            _dual_backup = getattr(ts_builder, "is_sdc6_dual", False)
-            ts_builder.is_sdc6_dual = False
-            X = ts_builder.extract_phenological_features(ts_values)
-            ts_builder.is_sdc6_dual = _dual_backup  # 恢复，供后续推断使用
-
+            # 【GCVI / LSWI 增强】: 训练样本(ts_values)目前只有 NDVI 序列。
+            # 为了让模型能够训练包含 GCVI 和 LSWI 的高维特征，基于物理先验在内存中补全这些波段。
+            is_dual_channel = getattr(ts_builder, "is_sdc6_dual", False)
+            if is_dual_channel:
+                ts_lswi = np.clip(ts_values - 0.15 + np.random.normal(0, 0.05, ts_values.shape), -1.0, 1.0)
+                ts_gcvi = np.clip(np.exp(ts_values * 1.8) - 1.0 + np.random.normal(0, 0.2, ts_values.shape), 0.0, 10.0)
+                interleaved = np.zeros((ts_values.shape[0], ts_values.shape[1] * 3), dtype=np.float32)
+                interleaved[:, 0::3] = ts_values
+                interleaved[:, 1::3] = ts_lswi
+                interleaved[:, 2::3] = ts_gcvi
+                ts_values_for_extract = interleaved
+            else:
+                ts_values_for_extract = ts_values
+            
+            X = ts_builder.extract_phenological_features(ts_values_for_extract)
             feature_cols = [f"feat_{i+1}" for i in range(X.shape[1])]
         else:
             self.target_t = None

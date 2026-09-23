@@ -200,12 +200,28 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
             logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
-    logger.info("[步骤 3/5] 执行形态学边缘腐蚀与狭窄田埂切分（切分零碎小田块）...")
+    logger.info("[步骤 3/5] 执行 OBIA 面向对象超像素分割 (SLIC)...")
     edge_mask = None
+    optical_rgb = None
     if input_mode == "geotiff" and sorted_files:
         edge_mask = loader.compute_spectral_edge_mask(sorted_files[0], crop_mask)
+        import rasterio
+        import numpy as np
+        try:
+            with rasterio.open(sorted_files[-1]) as src:
+                b3 = src.read(3).astype(np.float32)
+                b2 = src.read(2).astype(np.float32)
+                b1 = src.read(1).astype(np.float32)
+                def stretch(band):
+                    p2, p98 = np.percentile(band, (2, 98))
+                    stretched = np.clip((band - p2) / (p98 - p2 + 1e-5) * 255.0, 0, 255)
+                    return stretched.astype(np.uint8)
+                optical_rgb = np.dstack([stretch(b3), stretch(b2), stretch(b1)])
+                logger.info(f"  -> 成功加载真彩色光学底图用于 SLIC 指导，形状: {optical_rgb.shape}")
+        except Exception as e:
+            logger.warning(f"无法加载光学底图供SLIC使用: {e}")
     segmenter = ParcelSegmenter(config)
-    parcel_id_mask, parcel_metadata = segmenter.segment_parcels(crop_mask, conf_map, edge_mask=edge_mask)
+    parcel_id_mask, parcel_metadata = segmenter.segment_parcels(crop_mask, conf_map, edge_mask=edge_mask, optical_image=optical_rgb)
     total_valid_parcels = len(parcel_metadata)
     total_cultivated_mu = sum(p["area_mu"] for p in parcel_metadata)
     logger.info(f"  -> 成功勾勒并分离 {total_valid_parcels} 个独立农田地块，累计净耕地面积: {total_cultivated_mu:.1f} 亩。")

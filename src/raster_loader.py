@@ -61,6 +61,12 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
     valid_lswi = denom_lswi > 0
     lswi[valid_lswi] = (b4[valid_lswi] - b5[valid_lswi]) / denom_lswi[valid_lswi]
 
+    # --- GCVI (Green Chlorophyll Vegetation Index) ---
+    gcvi = np.zeros_like(b2)
+    valid_gcvi = b2 > 0
+    gcvi[valid_gcvi] = (b4[valid_gcvi] / b2[valid_gcvi]) - 1.0
+    gcvi = np.clip(gcvi, -2.0, 10.0)
+
     # 1. 水体与湿地沼泽：MNDWI > -0.08，或低近红外水体吸收
     mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
     is_water_wetland = (mndwi > -0.08) | ((mndwi > -0.15) & (ndvi < 0.20)) | ((b4 < 600.0) & (b2 > b4))
@@ -117,9 +123,38 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
     ndvi[is_mountain_veg] = np.minimum(ndvi[is_mountain_veg], 0.10)
     lswi[is_mountain_veg] = np.minimum(lswi[is_mountain_veg], -0.05)
+    gcvi[is_mountain_veg] = np.minimum(gcvi[is_mountain_veg], 0.0)
+    
+    gcvi[is_water_wetland] = np.minimum(gcvi[is_water_wetland], -0.5)
+    gcvi[final_urban_mask] = np.minimum(gcvi[final_urban_mask], 0.0)
 
-    return ndvi, lswi
+    return ndvi, lswi, gcvi
 
+
+    def load_optical_for_slic(self, tif_dir_or_list):
+        """
+        加载全分辨率的光学底图（RGB或假彩色）用于SLIC超像素分割
+        """
+        if isinstance(tif_dir_or_list, list) and len(tif_dir_or_list) > 0:
+            file_path = tif_dir_or_list[-1] # 使用最近一期的影像
+        else:
+            files = [os.path.join(tif_dir_or_list, f) for f in os.listdir(tif_dir_or_list) if f.endswith(('.tif', '.tiff'))]
+            file_path = sorted(files)[-1]
+            
+        with rasterio.open(file_path) as src:
+            # 读取 Red, Green, Blue (B3, B2, B1 for SDC30)
+            b3 = src.read(3).astype(np.float32)
+            b2 = src.read(2).astype(np.float32)
+            b1 = src.read(1).astype(np.float32)
+            
+            # 标准化到 0-255
+            def stretch(band):
+                p2, p98 = np.percentile(band, (2, 98))
+                stretched = np.clip((band - p2) / (p98 - p2 + 1e-5) * 255.0, 0, 255)
+                return stretched.astype(np.uint8)
+                
+            rgb = np.dstack([stretch(b3), stretch(b2), stretch(b1)])
+            return rgb
 
 class RasterLoader:
     def __init__(self, config=None):
@@ -289,7 +324,7 @@ class RasterLoader:
 
                             global_rows = r + np.arange(bh, dtype=np.float32)[:, np.newaxis]
                             global_cols = c + np.arange(bw, dtype=np.float32)[np.newaxis, :]
-                            ndvi, lswi = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
+                            ndvi, lswi, gcvi = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
                             if src.nodata is not None:
                                 nodata_mask = (b3 == src.nodata) | (b4 == src.nodata)
@@ -299,6 +334,7 @@ class RasterLoader:
                             # 双通道输出：时间步内同时记录 NDVI 和 LSWI
                             band_slices.append(ndvi)
                             band_slices.append(lswi)
+                            band_slices.append(gcvi)
                     elif is_multiband and len(src_handles) == 1:
                         src = src_handles[0]
                         for b in range(1, src.count + 1):
@@ -346,7 +382,7 @@ class RasterLoader:
                 b5 = src.read(5, out_shape=(out_h, out_w)).astype(np.float32)
                 thumb_rows = np.arange(out_h, dtype=np.float32)[:, np.newaxis] * step
                 thumb_cols = np.arange(out_w, dtype=np.float32)[np.newaxis, :] * step
-                thumbnail, _ = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, thumb_rows, thumb_cols)
+                thumbnail, _, _ = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, thumb_rows, thumb_cols)
             else:
                 band_idx = (src.count // 2 + 1) if (is_multiband and src.count > 1) else 1
                 try:
@@ -398,7 +434,7 @@ class RasterLoader:
                     b4 = src.read(4).astype(np.float32)
                     b5 = src.read(5).astype(np.float32)
 
-                    ndvi, lswi = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
+                    ndvi, lswi, gcvi = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
 
                     if src.nodata is not None:
                         nodata_mask = (b3 == src.nodata) | (b4 == src.nodata)
