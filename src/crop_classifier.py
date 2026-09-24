@@ -93,7 +93,10 @@ class CropClassifier:
             self.logger.info("  -> 自动激活智能物候指纹生成器：基于作物物候曲线库在内存中自动合成 200 个带真实抗噪波动的多时相标定样点...")
             df = self._generate_synthetic_training_samples()
         else:
-            df = pd.read_csv(training_csv_path, comment="#")
+            try:
+                df = pd.read_csv(training_csv_path, comment="#", encoding="utf-8")
+            except Exception:
+                df = pd.read_csv(training_csv_path, comment="#")
             if "point_id" in df.columns:
                 n_before = len(df)
                 df = df[~df["point_id"].astype(str).str.startswith("CH_")].reset_index(drop=True)
@@ -116,9 +119,9 @@ class CropClassifier:
             # 植被初筛硬门槛：放宽至 0.18，确保冬季翻耕待播农田与低植被覆盖休耕地顺利纳统
             self.veg_threshold = 0.18
 
-            if target_t is not None and target_t == raw_ts.shape[1] and sample_doys == doy_list:
-                # 样本与输入影像的时相 DOY 完全对齐，直接使用真实实测样本数据！
-                self.logger.info(f"  -> 标定样本时相 ({sample_doys}) 与输入影像完全对齐，启用 100% 真实地面标定特征空间！")
+            if target_t is not None and target_t == raw_ts.shape[1]:
+                # 样本与输入影像的时相数完全对齐，直接使用真实实测样本数据！
+                self.logger.info(f"  -> 标定样本时相数 (T={target_t}) 与输入影像完全对齐，启用 100% 真实地面标定特征空间！")
                 ts_values = raw_ts.astype(np.float32)
             elif target_t is not None and (target_t != raw_ts.shape[1] or is_short_span or is_winter_snapshot):
                 self.logger.info(f"输入影像时相数 (T={target_t}) 与标定样本基准 (T={raw_ts.shape[1]}) 不同，正在执行自适应对齐...")
@@ -133,8 +136,6 @@ class CropClassifier:
                             vals = row[doy_cols].values.astype(np.float32)
                             if c_label == 0:
                                 base_v = float(np.mean(vals[:max(1, min(len(vals), 3))]))
-                                # 【优化】：删除了强制压低林地绿度的 Bug 逻辑 (if base_v > 0.26)
-                                # 让模型真正学会遇到高 NDVI 时去观察 LSWI 或时序振幅，而不是盲目判断
                             else:
                                 base_v = float(np.max(vals))
                                 if base_v < 0.40:
@@ -148,10 +149,14 @@ class CropClassifier:
                     self.logger.info(f"  -> 成功将标定样本对齐至冬季高保真 {target_t} 个生长时相 (植被判别下限: NDVI >= {self.veg_threshold})")
                 else:
                     # 多时相数量差异：沿时间轴执行物候曲线线性插值对齐
-                    target_doys = doy_list if (doy_list and len(doy_list) == target_t) else np.linspace(sample_doys[0], sample_doys[-1], target_t)
+                    if sample_doys and max(sample_doys) <= 12:
+                        sample_doys_interp = [float(d) * 30.5 - 15.0 for d in sample_doys]
+                    else:
+                        sample_doys_interp = [float(d) for d in sample_doys]
+                    target_doys = doy_list if (doy_list and len(doy_list) == target_t) else np.linspace(sample_doys_interp[0], sample_doys_interp[-1], target_t)
                     aligned_list = []
                     for row in raw_ts:
-                        interp_row = np.interp(target_doys, sample_doys, row)
+                        interp_row = np.interp(target_doys, sample_doys_interp, row)
                         aligned_list.append(interp_row)
                     ts_values = np.array(aligned_list, dtype=np.float32)
                     self.logger.info(f"  -> 成功将标定样本插值对齐至目标 {target_t} 个生长时相")
@@ -160,25 +165,49 @@ class CropClassifier:
 
             self.target_t = target_t if target_t is not None else raw_ts.shape[1]
             
-            # 【GCVI / LSWI 增强】: 训练样本(ts_values)目前只有 NDVI 序列。
-            # 为了让模型能够训练包含 GCVI 和 LSWI 的高维特征，基于物理先验在内存中补全这些波段。
+            # 【GCVI / LSWI / CV 增强】: 训练样本(ts_values)目前主要为 NDVI 时序序列。
+            # 为了让模型能够充分学习包含 GCVI、LSWI 及空间纹理粗糙度的高维判别特征，
+            # 基于地物物理先验在内存中生成高保真多光谱及纹理特征矩阵。
             is_dual_channel = getattr(ts_builder, "is_sdc6_dual", False)
             if is_dual_channel:
                 ts_lswi = np.clip(ts_values - 0.15 + np.random.normal(0, 0.05, ts_values.shape), -1.0, 1.0)
-                # ★ 关键修正：极度茂盛的农田（红光极低）真实 GCVI 会飙升到 8~10，必须用 2.5 的指数拉伸模拟真实的高绿度作物
-                ts_gcvi = np.clip(np.exp(ts_values * 2.5) - 1.0 + np.random.normal(0, 0.5, ts_values.shape), 0.0, 15.0)
+                # 安全拉伸 GCVI，峰值适度控制在 8.0 以内，避免数值越界
+                ts_gcvi = np.clip(np.exp(ts_values * 2.2) - 1.0 + np.random.normal(0, 0.3, ts_values.shape), 0.0, 8.0)
                 
-                # 动态生成纹理 CV_B4：
-                # 真实遥感中平原农田含机耕道/垄沟/地块边缘，CV 通常在 0.02~0.08；
-                # 唯有剧烈起伏的山林与荒山 CV 才会高达 0.10~0.25。
-                # 必须保留合理的交叠，杜绝将模型训练成以固定 0.03 为生死线的假特征！
+                # 依据地物类型物理先验赋予精确的空间纹理 CV_B4 与短波水分响应
                 ts_cv = np.zeros_like(ts_values)
                 y_array = df["label"].values
+                crop_names = df["crop_name"].astype(str).values if "crop_name" in df.columns else [""] * len(df)
                 for i in range(len(y_array)):
-                    if y_array[i] > 0: # 农田：平整至中等起伏 (0.015 ~ 0.080)
-                        ts_cv[i, :] = np.random.uniform(0.015, 0.080, ts_values.shape[1])
-                    else: # 非农田 (水体/山林/荒漠)：宽范围分布 (0.010 ~ 0.180)
-                        ts_cv[i, :] = np.random.uniform(0.010, 0.180, ts_values.shape[1])
+                    c_name = crop_names[i]
+                    if y_array[i] > 0:
+                        # 农田：平整地块、内部均质度高 (0.015 ~ 0.038)
+                        ts_cv[i, :] = np.random.uniform(0.015, 0.038, ts_values.shape[1])
+                    else:
+                        is_forest = ("林" in c_name or "山" in c_name or "树" in c_name or 
+                                     (np.min(ts_values[i]) > 0.35 and np.max(ts_values[i]) > 0.55))
+                        is_lawn = ("草坪" in c_name or "绿地" in c_name or 
+                                   (np.ptp(ts_values[i]) < 0.15 and np.mean(ts_values[i]) > 0.45))
+                        is_water = ("水" in c_name or np.mean(ts_values[i]) < 0.0)
+
+                        if is_forest:
+                            # 山地森林/野生林：山体阴阳坡起伏与林冠阴影导致近红外纹理剧烈起伏 (0.070 ~ 0.200)
+                            ts_cv[i, :] = np.random.uniform(0.070, 0.200, ts_values.shape[1])
+                            ts_lswi[i, :] = np.clip(ts_values[i, :] - 0.45 + np.random.normal(0, 0.05, ts_values.shape[1]), -0.10, 0.25)
+                            ts_gcvi[i, :] = np.clip(ts_values[i, :] * 3.5 + np.random.normal(0, 0.2, ts_values.shape[1]), 1.0, 4.0)
+                        elif is_lawn:
+                            # 城镇社区草坪/高尔夫球场：地表修剪平整 (0.020 ~ 0.035)，但时序季相平坦无收割突降
+                            ts_cv[i, :] = np.random.uniform(0.020, 0.035, ts_values.shape[1])
+                            ts_lswi[i, :] = np.random.uniform(0.05, 0.18, ts_values.shape[1])
+                            ts_gcvi[i, :] = np.random.uniform(1.8, 3.5, ts_values.shape[1])
+                        elif is_water:
+                            ts_cv[i, :] = np.random.uniform(0.005, 0.020, ts_values.shape[1])
+                            ts_lswi[i, :] = np.random.uniform(0.30, 0.70, ts_values.shape[1])
+                            ts_gcvi[i, :] = -0.5
+                        else: # 裸土/建设用地
+                            ts_cv[i, :] = np.random.uniform(0.020, 0.050, ts_values.shape[1])
+                            ts_lswi[i, :] = np.random.uniform(-0.25, -0.05, ts_values.shape[1])
+                            ts_gcvi[i, :] = np.random.uniform(0.0, 0.5, ts_values.shape[1])
                 ts_cv = np.clip(ts_cv, 0.0, 0.5)
                 
                 # 交织为 4 通道 [NDVI, LSWI, GCVI, CV_B4]
@@ -405,9 +434,10 @@ class CropClassifier:
         # 如果我们不知道 t_eff，安全起见，我们直接计算前几列的最大值，或者直接把 0.18 的限制放宽。
         # 既然 XGBoost 已经足够强大，我们可以把前置的硬掩膜 veg_th 降低到 0.10，仅仅用于过滤纯粹的水体和深阴影。
         t_eff = getattr(self, "target_t", 3) 
-        # 为了兼容 inference 时 t_eff 变长的情况，我们取前 t_eff 列的最大值，或者如果 t_eff 很大，取全部波段
+        # 遥感农学物理硬阈值过滤 (Agronomic Physical Barrier):
+        # 旺季活跃农作物 NDVI 峰值必然 >= 0.30；沥青、建筑硬化面、裸岩与阴影像元物理上绝非农田
         max_val = np.max(X_flat[:, :min(t_eff+5, f//2)], axis=1) 
-        veg_th = 0.10 # 放宽限制，把辨别工作交给更强大的特征和 XGBoost
+        veg_th = 0.30 
         veg_mask = (max_val >= veg_th)
 
         predict_mask = valid_mask & veg_mask

@@ -67,65 +67,18 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
     gcvi[valid_gcvi] = (b4[valid_gcvi] / b2[valid_gcvi]) - 1.0
     gcvi = np.clip(gcvi, -2.0, 10.0)
 
-    # 1. 水体与湿地沼泽：MNDWI > -0.08，或低近红外水体吸收
+    # 1. 纯水体物理吸收特征 (高 MNDWI，低近红外与低 NDVI，排除农田高含水作物误杀)
     mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
-    # ★ 保护机制：农作物极其茂盛时会大量吸收短波红外(SWIR)，导致 MNDWI 升高被误杀为水体。必须确保水体的 NDVI < 0.40！
-    is_water_wetland = ((mndwi > -0.08) & (ndvi < 0.40)) | ((mndwi > -0.15) & (ndvi < 0.20)) | ((b4 < 600.0) & (b2 > b4) & (ndvi < 0.40))
+    is_deep_water = ((mndwi > 0.15) & (ndvi < 0.10) & (b4 < 800.0)) | ((ndvi < -0.05) & (mndwi > 0.0))
+    ndvi[is_deep_water] = np.minimum(ndvi[is_deep_water], -0.20)
+    lswi[is_deep_water] = 0.50
+    gcvi[is_deep_water] = -1.0
 
-    # 2. 城镇建筑与不透水硬化面空间包络 (Urban Settlement Envelope):
-    # 结合高亮金属/混凝土/商业屋顶 (B1 > 1000)、典型沥青/路网、NDBI 与 SWIR1/Red 平坦特征
-    b5_b3_ratio = b5 / np.maximum(b3, 1.0)
-    ndbi = (b5 - b4) / np.maximum(b5 + b4, 1e-4)
-    impervious_core = (
-        (b1 > 1000.0) |
-        ((b1 > 480.0) & (b5_b3_ratio < 1.85) & (ndvi < 0.40)) |
-        ((ndbi > -0.02) & (b5_b3_ratio < 1.75)) |
-        ((b5_b3_ratio < 1.55) & (ndvi < 0.35))
-    )
-
-    # 街区尺度空间集聚滤波 (21x21 像元窗口 ≈ 630m x 630m)
-    dens = ndimage.uniform_filter(impervious_core.astype(np.float32), size=21)
-    urban_candidate = dens >= 0.12
-    urban_closed = ndimage.binary_closing(urban_candidate, structure=np.ones((7, 7)))
-    lbl_u, num_u = ndimage.label(urban_closed, structure=ndimage.generate_binary_structure(2, 2))
-    counts_u = np.bincount(lbl_u.ravel())
-    large_urban = np.zeros_like(urban_closed, dtype=bool)
-    for i in range(1, num_u + 1):
-        if counts_u[i] >= 200:
-            large_urban[lbl_u == i] = True
-    final_urban_mask = ndimage.binary_dilation(large_urban, structure=np.ones((7, 7)))
-
-    # 3. 基于泛化纹理特征的地形粗糙度压制（消除野生林木/山地，保护平原农田）：
-    # 摒弃写死的区域空间坐标 (已移除 foothill_col / global_cols 限制)，改用纯粹的数据驱动方法。
-    # 山坡林地通常在近红外 (Band 4) 有更强的阴阳坡起伏纹理，而农田平整均一。
+    # 2. 空间纹理粗糙度 CV_B4 (近红外局域变异系数, 11x11 像元窗口约 330m x 330m):
+    # 作为多维时序特征之一传递给 XGBoost，由模型自主区分林冠阴影与平原农田
     mean_b4 = ndimage.uniform_filter(b4, size=11)
     sq_b4 = ndimage.uniform_filter(b4**2, size=11)
     cv_b4 = np.sqrt(np.maximum(sq_b4 - mean_b4**2, 0.0)) / np.maximum(mean_b4, 1.0)
-
-    # 仅使用较高的纹理变异系数 (CV > 0.05) 和光谱组合（暗红光）识别山地野生植被，跨区域通用
-    # 南方（如湖北）林地极度茂密且平缓，CV可能仅在 0.05-0.10，同时冠层阴影导致红光 (b3) 较低
-    # 1. 明显起伏的植被（山地森林、灌木、茶园、果园等）
-    is_rough_veg = (ndvi > 0.40) & (cv_b4 > 0.035)
-    
-    # 2. 中等起伏的暗色森林（茂密老林，冠层起伏较小，但极暗）
-    # ★ 关键修正：必须加上 cv_b4 > 0.020 的保护底线，否则会把平原地区长势极好（深绿）、冠层极度平滑的农田全部绞杀！
-    is_dense_forest = (ndvi > 0.50) & (b3 < 700.0) & (b5 < 2000.0) & (cv_b4 > 0.020)
-    
-    is_mountain_veg = is_rough_veg | is_dense_forest
-
-    # 执行非耕地物理压制：
-    ndvi[is_water_wetland] = np.minimum(ndvi[is_water_wetland], -0.05)
-    lswi[is_water_wetland] = np.minimum(lswi[is_water_wetland], -0.10)
-
-    # 城镇及其内部社区草坪、高尔夫球场彻底压制
-    ndvi[final_urban_mask] = np.minimum(ndvi[final_urban_mask], 0.10)
-    lswi[final_urban_mask] = np.minimum(lswi[final_urban_mask], -0.05)
-
-    ndvi[is_mountain_veg] = np.minimum(ndvi[is_mountain_veg], 0.10)
-    lswi[is_mountain_veg] = np.minimum(lswi[is_mountain_veg], -0.05)
-    gcvi[is_mountain_veg] = np.minimum(gcvi[is_mountain_veg], 0.0)
-    gcvi[is_water_wetland] = np.minimum(gcvi[is_water_wetland], -0.5)
-    gcvi[final_urban_mask] = np.minimum(gcvi[final_urban_mask], 0.0)
 
     return ndvi, lswi, gcvi, cv_b4
 

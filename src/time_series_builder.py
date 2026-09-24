@@ -94,7 +94,7 @@ class TimeSeriesBuilder:
 
         # 自适应数值范围归一化（兼容未缩放的 Sentinel-2 / Landsat L2A 地表反射率数据 0~10000）
         val_max = float(np.max(ts)) if ts.size > 0 else 0.0
-        if val_max > 10.0:
+        if val_max > 100.0:
             ts = ts / 10000.0
 
         # --- SDC30 双通道拆分：由 raster_loader 在加载 SDC6 数据时显式设置 is_sdc6_dual=True ---
