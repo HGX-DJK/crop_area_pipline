@@ -366,8 +366,15 @@ class VectorExporter:
                 sub_mask = (parcel_id_mask[r0:r1, c0:c1] == pid)
                 offset_r, offset_c = r0, c0
             else:
-                sub_mask = (parcel_id_mask == pid)
-                offset_r, offset_c = 0, 0
+                coords = np.argwhere(parcel_id_mask == pid)
+                if len(coords) == 0:
+                    continue
+                r0 = max(0, int(np.min(coords[:, 0])) - 1)
+                r1 = min(h_mask, int(np.max(coords[:, 0])) + 2)
+                c0 = max(0, int(np.min(coords[:, 1])) - 1)
+                c1 = min(w_mask, int(np.max(coords[:, 1])) + 2)
+                sub_mask = (parcel_id_mask[r0:r1, c0:c1] == pid)
+                offset_r, offset_c = r0, c0
 
             geo_transform = tuple(geo_info["transform"]) if (geo_info and "transform" in geo_info) else None
             tasks.append({
@@ -437,16 +444,19 @@ class VectorExporter:
             "features": features
         }
 
-        # 写入 GeoJSON 文件（将坐标点对压缩为紧凑单行格式，既符合标准又清晰整洁）
-        raw_json = json.dumps(geojson_data, indent=2, ensure_ascii=False)
-        compact_json = re.sub(
-            r'\[\s*(-?\d+\.?\d*(?:[eE][+-]?\d+)?),\s*(-?\d+\.?\d*(?:[eE][+-]?\d+)?)\s*\]',
-            r'[\1, \2]',
-            raw_json
-        )
-
+        # 高性能流式写入 GeoJSON 文件（保持标准 Feature 结构，杜绝巨型字符串正则回溯匹配的性能瓶颈）
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write(compact_json)
+            f.write('{\n  "type": "FeatureCollection",\n')
+            f.write('  "name": "vectorized_parcels",\n')
+            f.write(f'  "crs": {{\n    "type": "name",\n    "properties": {{"name": "{crs_urn}"}}\n  }},\n')
+            f.write('  "features": [\n')
+            for i, feat in enumerate(features):
+                f.write('    ' + json.dumps(feat, ensure_ascii=False))
+                if i < len(features) - 1:
+                    f.write(',\n')
+                else:
+                    f.write('\n')
+            f.write('  ]\n}\n')
 
         crs_desc = "WGS84 经纬度 [lon, lat] (RFC 7946 国际标准)" if is_wgs84 else f"UTM 投影米制坐标 [{self.crs}]"
         log_success(self.logger, f"已成功生成地块矢量 GeoJSON: {output_path} (共包含 {len(features)} 个独立要素，坐标系: {crs_desc})")

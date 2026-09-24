@@ -27,6 +27,7 @@ class ParcelSegmenter:
         self.discard_oversized = seg_cfg.get("discard_oversized", False)
         self.max_export_parcels = seg_cfg.get("max_export_parcels", 500)
         self.connectivity = seg_cfg.get("connectivity", 8)
+        self.enable_obia = seg_cfg.get("enable_obia", False)
         self.spatial_res = self.config.get("spatial", {}).get("resolution_meters", 10.0)
         self.pixel_area_m2 = self.spatial_res * self.spatial_res  # 10m x 10m = 100 m²
 
@@ -125,7 +126,7 @@ class ParcelSegmenter:
         # OBIA 升维：如果提供了高分辨率光学底图，执行 SLIC 超像素分割
         # =========================================================================
         obia_mask = None
-        if optical_image is not None:
+        if self.enable_obia and optical_image is not None:
             self.logger.info("  [OBIA] 正在对高分辨率光学底图执行 SLIC 超像素过分割...")
             try:
                 from skimage.segmentation import slic
@@ -160,10 +161,12 @@ class ParcelSegmenter:
                 self.logger.warning(f"  [OBIA] SLIC 处理失败 ({e})。自动降级到像素级连通域模式...")
 
         # -------------------------------------------------------------------------
-
         
-        # 1. 生成农田二值掩膜 (只要是农作物即为 True)
-        cropland_binary = (crop_classified_mask > 0).astype(np.uint8)
+        # 1. 生成农田二值掩膜 (只要是农作物即为 True，若启用 OBIA 则采用超像素边界融合结果)
+        if obia_mask is not None:
+            cropland_binary = obia_mask.copy()
+        else:
+            cropland_binary = (crop_classified_mask > 0).astype(np.uint8)
 
         # 2. 依据联合国手册第 8 章：矢量化计算不同作物交界处的边界梯度（Zero-Copy Slicing）
         gradient_edges = np.zeros((rows, cols), dtype=bool)
@@ -217,11 +220,13 @@ class ParcelSegmenter:
                 
                 hole_sizes = np.bincount(lbl_holes.ravel())
                 max_hole_pixels = 25 # 仅限闭合 25 像元 (约 3.5 亩) 以内的细小农田微空洞
-                fill_mask = np.zeros_like(cleaned, dtype=bool)
-                for h_id in range(1, n_holes + 1):
-                    if h_id not in edge_labels and hole_sizes[h_id] <= max_hole_pixels:
-                        fill_mask[lbl_holes == h_id] = True
-                cleaned[fill_mask] = 1
+                valid_hole_lut = (hole_sizes <= max_hole_pixels)
+                valid_hole_lut[0] = False
+                if edge_labels:
+                    for el in edge_labels:
+                        valid_hole_lut[el] = False
+                cleaned[valid_hole_lut[lbl_holes]] = 1
+                del lbl_holes, inverted, valid_hole_lut
 
         # 4. 连通域标记（Connected Component Labeling）
         struct_conn = ndimage.generate_binary_structure(2, 2 if self.connectivity == 8 else 1)

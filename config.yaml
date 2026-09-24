@@ -39,6 +39,7 @@ segmentation:
   discard_oversized: false      # 是否丢弃超过上限的斑块（保留超大集中连片农田）
   max_export_parcels: 3000      # 矢量化导出的主力核心地块上限（扩大至 3000 块，让平原农田大面积饱满呈现）
   connectivity: 8               # 连通域拓扑连接方式（4连通或8连通）
+  enable_obia: false            # 是否启用 OBIA (SLIC 超像素) 辅助分割 (大规模遥感影像推荐关闭以提升性能，保持毫秒级形态学切分)
 
 preprocessing:
   apply_temporal_smoothing: false # 是否开启多时相抗噪滤波 (Savitzky-Golay，滤除薄云突变噪声)

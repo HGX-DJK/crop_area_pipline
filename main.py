@@ -72,7 +72,7 @@ def load_config(config_path="config.yaml"):
     return cfg
 
 
-def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False, streaming=False, n_jobs=None, clean_output=True):
+def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff_dir=None, override_output_dir=None, track_rotation=False, sample_plan=False, quiet=False, streaming=False, n_jobs=None, clean_output=True, enable_obia=False):
     logger = get_logger("流水线", quiet=quiet)
     print("=" * 76)
     print("🌾 联合国农业统计遥感手册标准：农作物种植区域提取与零碎地块矢量化系统")
@@ -90,6 +90,8 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         config.setdefault("performance", {})["vectorization_n_jobs"] = n_jobs
     if streaming:
         config.setdefault("performance", {})["enable_window_streaming"] = True
+    if enable_obia:
+        config.setdefault("segmentation", {})["enable_obia"] = True
 
     output_dir = config.get("paths", {}).get("output_dir", "output")
     os.makedirs(output_dir, exist_ok=True)
@@ -200,26 +202,22 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
             logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
-    logger.info("[步骤 3/5] 执行 OBIA 面向对象超像素分割 (SLIC)...")
+    enable_obia = config.get("segmentation", {}).get("enable_obia", False)
+    if enable_obia:
+        logger.info("[步骤 3/5] 执行面向对象零碎农田形态学切分与 OBIA (SLIC) 引导...")
+    else:
+        logger.info("[步骤 3/5] 执行面向对象零碎农田形态学与田埂切分 (高精自适应模式)...")
+
     edge_mask = None
     optical_rgb = None
     if input_mode == "geotiff" and sorted_files:
         edge_mask = loader.compute_spectral_edge_mask(sorted_files[0], crop_mask)
-        import rasterio
-        import numpy as np
-        try:
-            with rasterio.open(sorted_files[-1]) as src:
-                b3 = src.read(3).astype(np.float32)
-                b2 = src.read(2).astype(np.float32)
-                b1 = src.read(1).astype(np.float32)
-                def stretch(band):
-                    p2, p98 = np.percentile(band, (2, 98))
-                    stretched = np.clip((band - p2) / (p98 - p2 + 1e-5) * 255.0, 0, 255)
-                    return stretched.astype(np.uint8)
-                optical_rgb = np.dstack([stretch(b3), stretch(b2), stretch(b1)])
+        if enable_obia:
+            try:
+                optical_rgb = loader.load_optical_for_slic(sorted_files)
                 logger.info(f"  -> 成功加载真彩色光学底图用于 SLIC 指导，形状: {optical_rgb.shape}")
-        except Exception as e:
-            logger.warning(f"无法加载光学底图供SLIC使用: {e}")
+            except Exception as e:
+                logger.warning(f"无法加载光学底图供 SLIC 使用: {e}")
     segmenter = ParcelSegmenter(config)
     parcel_id_mask, parcel_metadata = segmenter.segment_parcels(crop_mask, conf_map, edge_mask=edge_mask, optical_image=optical_rgb)
     total_valid_parcels = len(parcel_metadata)
@@ -345,6 +343,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-clean", dest="clean_output", action="store_false", default=True, help="保留 output 目录中的历史成果文件，不执行自动清理")
     parser.add_argument("--self-check", action="store_true", help="一键执行全系统自动化测试与健康自检")
     parser.add_argument("--quiet", action="store_true", help="开启静默模式，仅输出最终统计台账与严重错误")
+    parser.add_argument("--enable-obia", action="store_true", help="启用 OBIA (SLIC 超像素) 辅助分割 (较耗时，适合超高分辨率微观小样区)")
     args = parser.parse_args()
 
     if args.self_check:
@@ -362,5 +361,6 @@ if __name__ == "__main__":
         quiet=args.quiet,
         streaming=args.streaming,
         n_jobs=args.n_jobs,
-        clean_output=args.clean_output
+        clean_output=args.clean_output,
+        enable_obia=args.enable_obia
     )

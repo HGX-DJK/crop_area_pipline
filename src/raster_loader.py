@@ -130,21 +130,27 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
     return ndvi, lswi, gcvi, cv_b4
 
 
+class RasterLoader:
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.logger = get_logger("栅格加载")
+        self.spatial_cfg = self.config.get("spatial", {})
+
     def load_optical_for_slic(self, tif_dir_or_list):
         """
         加载全分辨率的光学底图（RGB或假彩色）用于SLIC超像素分割
         """
         if isinstance(tif_dir_or_list, list) and len(tif_dir_or_list) > 0:
-            file_path = tif_dir_or_list[-1] # 使用最近一期的影像
+            file_path = tif_dir_or_list[-1]  # 使用最近一期的影像
         else:
             files = [os.path.join(tif_dir_or_list, f) for f in os.listdir(tif_dir_or_list) if f.endswith(('.tif', '.tiff'))]
             file_path = sorted(files)[-1]
             
         with rasterio.open(file_path) as src:
             # 读取 Red, Green, Blue (B3, B2, B1 for SDC30)
-            b3 = src.read(3).astype(np.float32)
-            b2 = src.read(2).astype(np.float32)
-            b1 = src.read(1).astype(np.float32)
+            b3 = np.array(src.read(3), dtype=np.float32)
+            b2 = np.array(src.read(2), dtype=np.float32)
+            b1 = np.array(src.read(1), dtype=np.float32)
             
             # 标准化到 0-255
             def stretch(band):
@@ -154,12 +160,6 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
                 
             rgb = np.dstack([stretch(b3), stretch(b2), stretch(b1)])
             return rgb
-
-class RasterLoader:
-    def __init__(self, config=None):
-        self.config = config or {}
-        self.logger = get_logger("栅格加载")
-        self.spatial_cfg = self.config.get("spatial", {})
 
     def resolve_tif_files(self, tif_dir_or_list):
         """解析并返回有效的 GeoTIFF 文件路径列表。"""

@@ -341,6 +341,7 @@ class WebGISDashboardBuilder:
     var map = L.map('map', {{
       center: [{center_lat}, {center_lon}],
       zoom: 15,
+      preferCanvas: true,
       layers: [esriSat]
     }});
 
