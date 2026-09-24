@@ -70,6 +70,11 @@ def get_shared_handler() -> logging.Handler:
     """获取单例格式化输出 Handler，防止多次添加产生重复打印"""
     global _SHARED_HANDLER
     if _SHARED_HANDLER is None:
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
         _SHARED_HANDLER = logging.StreamHandler(sys.stdout)
         _SHARED_HANDLER.setFormatter(AgriColorFormatter())
     return _SHARED_HANDLER

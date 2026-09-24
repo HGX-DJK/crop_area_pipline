@@ -114,8 +114,8 @@ def _worker_process_single_parcel(task: dict) -> Optional[dict]:
     # [视觉层升级] RDP 道格拉斯-普克抽稀，保留 0.5 的安全容差，防止小地块被折叠合并
     simplified = _simplify_polygon(pts_grid, tolerance=0.5)
     if smooth_boundaries:
-        # [视觉层升级] Chaikin 迭代提升至 3 次，实现出版级的平滑天然地块曲线
-        simplified = _chaikin_smooth(simplified, iterations=3)
+        # Chaikin 适度平滑（1次迭代消除网格锯齿台阶，同时严密保持农田平直田垄与几何边界）
+        simplified = _chaikin_smooth(simplified, iterations=1)
 
     utm_ring = []
     wgs84_ring = []

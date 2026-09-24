@@ -211,7 +211,9 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     edge_mask = None
     optical_rgb = None
     if input_mode == "geotiff" and sorted_files:
-        edge_mask = loader.compute_spectral_edge_mask(sorted_files[0], crop_mask)
+        # 优选生长旺季影像（冠层绿度高、与裸土机耕道反差最显著）提取真实路网与田埂
+        peak_idx = len(sorted_files) // 2 if len(sorted_files) > 1 else 0
+        edge_mask = loader.compute_spectral_edge_mask(sorted_files[peak_idx], crop_mask)
         if enable_obia:
             try:
                 optical_rgb = loader.load_optical_for_slic(sorted_files)

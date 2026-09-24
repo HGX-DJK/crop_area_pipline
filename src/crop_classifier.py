@@ -168,6 +168,7 @@ class CropClassifier:
             # 【GCVI / LSWI / CV 增强】: 训练样本(ts_values)目前主要为 NDVI 时序序列。
             # 为了让模型能够充分学习包含 GCVI、LSWI 及空间纹理粗糙度的高维判别特征，
             # 基于地物物理先验在内存中生成高保真多光谱及纹理特征矩阵。
+            np.random.seed(self.random_state)
             is_dual_channel = getattr(ts_builder, "is_sdc6_dual", False)
             if is_dual_channel:
                 ts_lswi = np.clip(ts_values - 0.15 + np.random.normal(0, 0.05, ts_values.shape), -1.0, 1.0)
@@ -499,6 +500,45 @@ class CropClassifier:
                         preds_flat[chunk_indices] = classes_arr[np.argmax(chunk_prob, axis=1)]
                         
                     max_probs[chunk_indices] = np.max(chunk_prob, axis=1)
+
+        # 农艺物候学物理屏障 (Agronomic Phenological Barrier):
+        # 1. 活跃农作物在生长旺季 NDVI 峰值必然 >= 0.35 (排除低覆盖度荒地、建筑道路与暗像元)
+        # 2. 农田必须具备翻耕播种或收割低谷 (ndvi_min <= 0.35 或 动态变幅 ndvi_range >= 0.25)
+        # 3. 彻底排除常绿乔木森林/野生林冠 (全年高绿度且季相变幅平缓):
+        #    若 t_eff >= 3:
+        #    early_ndvi >= 0.38 且 mid_ndvi >= 0.65 且 late_ndvi >= 0.55 且 ndvi_range < 0.28 -> 判定为常绿乔木林，强制归 0 (非农田)
+        # 4. 彻底排除平坦城镇草坪/绿地:
+        #    ndvi_range < 0.18 且 ndvi_max < 0.65 -> 判定为草坪，强制归 0
+        crop_cand = (preds_flat > 0)
+        if np.any(crop_cand):
+            ndvi_max_col = t_eff
+            ndvi_min_col = t_eff + 1
+            ndvi_range_col = t_eff + 2
+            
+            if f > ndvi_range_col:
+                p_max = X_flat[:, ndvi_max_col]
+                p_min = X_flat[:, ndvi_min_col]
+                p_range = X_flat[:, ndvi_range_col]
+            else:
+                ts_slice = X_flat[:, :t_eff]
+                p_max = np.max(ts_slice, axis=1)
+                p_min = np.min(ts_slice, axis=1)
+                p_range = p_max - p_min
+
+            basic_valid = (p_max >= 0.35) & ((p_min <= 0.35) | (p_range >= 0.25))
+            if t_eff >= 3:
+                ts_early = X_flat[:, 0]
+                ts_mid = X_flat[:, t_eff // 2]
+                ts_late = X_flat[:, t_eff - 1]
+                is_forest = (ts_early >= 0.38) & (ts_mid >= 0.65) & (ts_late >= 0.55) & (p_range < 0.28)
+                is_lawn = (p_range < 0.18) & (p_max < 0.65)
+                invalid_crop = crop_cand & ((~basic_valid) | is_forest | is_lawn)
+            else:
+                invalid_crop = crop_cand & (~basic_valid)
+
+            if np.any(invalid_crop):
+                preds_flat[invalid_crop] = 0
+                max_probs[invalid_crop] = 1.0
 
         predicted_mask = preds_flat.reshape(h, w).astype(np.int32)
         confidence_map = max_probs.reshape(h, w).astype(np.float32)

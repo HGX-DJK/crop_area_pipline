@@ -199,9 +199,14 @@ class ParcelSegmenter:
                 structure = np.ones((k_size, k_size), dtype=np.uint8) if self.connectivity == 8 else ndimage.generate_binary_structure(2, 1)
                 cleaned = ndimage.binary_opening(cropland_binary, structure=structure).astype(np.uint8)
             else:
-                # 中低分辨率 (如 30m Landsat/CSDC30)：采用十字结构元切断角点对角粘连，杜绝过度消除
-                structure_cross = ndimage.generate_binary_structure(2, 1)
-                cleaned = ndimage.binary_opening(cropland_binary, structure=structure_cross).astype(np.uint8)
+                # 中低分辨率 (如 30m Landsat/SDC30)：像元尺度已达 30m，直接开运算会消除大量 1~2 像元窄条河谷田块。
+                # 若已提供外部高精物理道路/田埂掩膜 (edge_mask)，则已天然切断田块，无需进行破坏性开运算；
+                # 若未提供 edge_mask，则采用十字结构元轻度断开对角粘连。
+                if edge_mask is not None and np.any(edge_mask):
+                    cleaned = cropland_binary
+                else:
+                    structure_cross = ndimage.generate_binary_structure(2, 1)
+                    cleaned = ndimage.binary_opening(cropland_binary, structure=structure_cross).astype(np.uint8)
             del cropland_binary
         else:
             cleaned = cropland_binary

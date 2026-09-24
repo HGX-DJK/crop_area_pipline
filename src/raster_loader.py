@@ -449,18 +449,12 @@ class RasterLoader:
             gy_ndvi = cv2.Sobel(ndvi, cv2.CV_32F, 0, 1, ksize=3)
             mag_ndvi = np.sqrt(gx_ndvi**2 + gy_ndvi**2)
 
-            mag_b4_norm = mag_b4 / np.maximum(b4, 1.0)
-            combined_edge = mag_b4_norm * 0.4 + mag_ndvi * 0.6
-
-            crop_pixels = combined_edge[cropland_mask > 0]
-            if len(crop_pixels) == 0:
-                return np.zeros_like(cropland_mask, dtype=bool)
-
-            thresh = float(np.percentile(crop_pixels, percentile_thresh))
-            is_edge = (combined_edge > thresh) & (cropland_mask > 0)
-
-            struct_cross = ndimage.generate_binary_structure(2, 1)
-            edge_mask = ndimage.binary_dilation(is_edge, structure=struct_cross)
+            # 真实物理机耕路与排灌渠网络提取：
+            # 1. 位于作物冠层与田间通道交界，NDVI 梯度具有局部清晰跃变 (mag_ndvi > 0.22)
+            # 2. 道路本身为裸土、碎石、水泥硬化机耕道，绿度显著低于旺盛农田 (ndvi < 0.55)
+            # 采用细线物理阻隔（避免盲目百分位数一刀切与过度膨胀吞噬内部农田）
+            is_edge = (mag_ndvi > 0.22) & (ndvi < 0.55) & (cropland_mask > 0)
+            edge_mask = is_edge
             self.logger.info(f"成功从遥感影像中提取 {np.sum(edge_mask):,} 个真实机耕路/水渠/田埂物理边缘像元。")
             return edge_mask
         except Exception as e:
