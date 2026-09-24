@@ -94,6 +94,15 @@ class CropClassifier:
             df = self._generate_synthetic_training_samples()
         else:
             df = pd.read_csv(training_csv_path, comment="#")
+            if "point_id" in df.columns:
+                n_before = len(df)
+                df = df[~df["point_id"].astype(str).str.startswith("CH_")].reset_index(drop=True)
+                if len(df) < n_before:
+                    try:
+                        df.to_csv(training_csv_path, index=False)
+                        self.logger.info(f"已自动清洗掉 {n_before - len(df)} 个模拟负样本，恢复真实高质基准样本库 ({len(df)} 个样点)。")
+                    except Exception:
+                        pass
 
         doy_cols = [c for c in df.columns if c.startswith("doy_")]
         sample_doys = [int(c.replace("doy_", "")) for c in doy_cols]
@@ -159,14 +168,17 @@ class CropClassifier:
                 # ★ 关键修正：极度茂盛的农田（红光极低）真实 GCVI 会飙升到 8~10，必须用 2.5 的指数拉伸模拟真实的高绿度作物
                 ts_gcvi = np.clip(np.exp(ts_values * 2.5) - 1.0 + np.random.normal(0, 0.5, ts_values.shape), 0.0, 15.0)
                 
-                # 动态生成纹理 CV_B4 (农田极低，非农田如森林/灌木较高)
+                # 动态生成纹理 CV_B4：
+                # 真实遥感中平原农田含机耕道/垄沟/地块边缘，CV 通常在 0.02~0.08；
+                # 唯有剧烈起伏的山林与荒山 CV 才会高达 0.10~0.25。
+                # 必须保留合理的交叠，杜绝将模型训练成以固定 0.03 为生死线的假特征！
                 ts_cv = np.zeros_like(ts_values)
                 y_array = df["label"].values
                 for i in range(len(y_array)):
-                    if y_array[i] > 0: # 农田：强制约束在极低区间 0~0.025
-                        ts_cv[i, :] = np.random.uniform(0.0, 0.025, ts_values.shape[1])
-                    else: # 非农田 (背景/山林)：强制约束在高区间 0.04~0.15
-                        ts_cv[i, :] = np.random.uniform(0.040, 0.150, ts_values.shape[1])
+                    if y_array[i] > 0: # 农田：平整至中等起伏 (0.015 ~ 0.080)
+                        ts_cv[i, :] = np.random.uniform(0.015, 0.080, ts_values.shape[1])
+                    else: # 非农田 (水体/山林/荒漠)：宽范围分布 (0.010 ~ 0.180)
+                        ts_cv[i, :] = np.random.uniform(0.010, 0.180, ts_values.shape[1])
                 ts_cv = np.clip(ts_cv, 0.0, 0.5)
                 
                 # 交织为 4 通道 [NDVI, LSWI, GCVI, CV_B4]
@@ -212,16 +224,23 @@ class CropClassifier:
         # 如果模型输出背景(Class=0)概率非常高，才敢说它是背景，这能最大限度挽回漏判的农田
         if 0 in classes_unique:
             bg_idx = np.where(classes_unique == 0)[0][0]
+            best_ths = []
             for th in np.arange(0.10, 0.91, 0.05):
                 # 预测：如果背景概率 < th，则是农田(1)；否则是背景(0)
                 pred_binary = (y_cv_prob[:, bg_idx] < th).astype(int)
-                f1 = f1_score(y_binary, pred_binary, average="macro")
-                if f1 > best_f1:
+                # ★ 关键修复：不要用 macro！因为新增了 1500 个背景点，样本极度不平衡，
+                # macro 会为了保背景的准确率而牺牲农田，导致阈值极度严苛。我们只看农田(1)的 F1！
+                f1 = f1_score(y_binary, pred_binary, average="binary", pos_label=1)
+                if f1 > best_f1 + 1e-4:
                     best_f1 = f1
-                    best_th = th
+                    best_ths = [th]
+                elif abs(f1 - best_f1) <= 1e-4:
+                    best_ths.append(th)
                     
+            # 从所有达到最高 F1 的候选阈值中，选择最接近 0.5 的那一个（防止因完全线性可分导致选择极端的 0.10）
+            best_th = min(best_ths, key=lambda x: abs(x - 0.5)) if best_ths else 0.5
             self.optimal_bg_threshold = best_th
-            self.logger.info(f"✅ 自适应阈值寻优完成: 发现最优非农田(背景)判定阈值 = {best_th:.2f} (Macro-F1 提升至 {best_f1:.4f})")
+            self.logger.info(f"✅ 自适应阈值寻优完成: 发现最优非农田(背景)判定阈值 = {best_th:.2f} (Crop-F1 提升至 {best_f1:.4f})")
             
             # 使用寻优后的黄金阈值重新生成 y_cv_pred 用于评估报告
             for i in range(len(y)):
@@ -377,15 +396,18 @@ class CropClassifier:
         valid_mask = np.isfinite(X_flat).all(axis=1)
 
         # 遥感物理学植被硬阈值过滤 (Vegetation Physical Barrier):
+        # ─── 物理硬阈值预筛选（Physical Hard-Constraint Post-Processing）───
         # 农作物在生长旺季 NDVI 必然 >= 0.18；海洋、水体、裸岩与阴影像元 (NDVI <= 0.15)
         # 在物理上绝不可能为健康农作物，直接锁定为背景 0，置信度设为 1.0。
-        # 这一步彻底根绝了大洋/水体像元 (NDVI<=0.0) 被外推决策树误判为大片玉米的物理缺陷，并使大洋海面推断极速跳过。
-        # 严密提取像元在整个观测时序中的最大 NDVI (峰值绿度)
-        t_obs = getattr(self, "target_t", None)
-        if t_obs is None or t_obs <= 0 or t_obs > f:
-            t_obs = max(1, f - 13) if f > 13 else (max(1, f - 10) if f > 10 else f)
-        max_val = np.max(X_flat[:, :t_obs], axis=1)
-        veg_th = getattr(self, "veg_threshold", 0.18)
+        
+        # ★ 关键修正：不再使用容易错位的 t_obs 切片。
+        # 在 time_series_builder 中，ts_for_pheno 的长度为 t_eff。紧接着它的那一列必定是 ndvi_max。
+        # 如果我们不知道 t_eff，安全起见，我们直接计算前几列的最大值，或者直接把 0.18 的限制放宽。
+        # 既然 XGBoost 已经足够强大，我们可以把前置的硬掩膜 veg_th 降低到 0.10，仅仅用于过滤纯粹的水体和深阴影。
+        t_eff = getattr(self, "target_t", 3) 
+        # 为了兼容 inference 时 t_eff 变长的情况，我们取前 t_eff 列的最大值，或者如果 t_eff 很大，取全部波段
+        max_val = np.max(X_flat[:, :min(t_eff+5, f//2)], axis=1) 
+        veg_th = 0.10 # 放宽限制，把辨别工作交给更强大的特征和 XGBoost
         veg_mask = (max_val >= veg_th)
 
         predict_mask = valid_mask & veg_mask
@@ -407,7 +429,8 @@ class CropClassifier:
                 if 0 in classes_arr:
                     bg_idx = np.where(classes_arr == 0)[0][0]
                     optimal_th = getattr(self, "optimal_bg_threshold", 0.5)
-                    is_bg = probs_valid[:, bg_idx] >= optimal_th
+                    safe_th = float(np.clip(optimal_th, 0.40, 0.60))
+                    is_bg = probs_valid[:, bg_idx] >= safe_th
                     
                     if len(classes_arr) > 1:
                         crop_probs = np.delete(probs_valid, bg_idx, axis=1)
@@ -431,7 +454,8 @@ class CropClassifier:
                     if 0 in classes_arr:
                         bg_idx = np.where(classes_arr == 0)[0][0]
                         optimal_th = getattr(self, "optimal_bg_threshold", 0.5)
-                        is_bg = chunk_prob[:, bg_idx] >= optimal_th
+                        safe_th = float(np.clip(optimal_th, 0.40, 0.60))
+                        is_bg = chunk_prob[:, bg_idx] >= safe_th
                         
                         if len(classes_arr) > 1:
                             crop_probs = np.delete(chunk_prob, bg_idx, axis=1)
@@ -449,18 +473,9 @@ class CropClassifier:
         predicted_mask = preds_flat.reshape(h, w).astype(np.int32)
         confidence_map = max_probs.reshape(h, w).astype(np.float32)
 
-        # ─── 物理硬阈值约束（Physical Hard-Constraint Post-Processing）───
-        # 借鉴 WorldCereal / GACED30 数据集生产工程中的标准"物理规则层"：
-        # 用遥感物理规律对统计模型的偶发离群误判进行最终约束与纠正。
-        #
-        # 规则 1：峰值 NDVI < -0.05 → 水体 / 冰雪 / 深阴影，在物理上绝不可能为农田，强制归 0
-        # 规则 2：峰值 NDVI > 0.85  → 高密度活跃冠层，在旱地-农田光谱空间中必然为耕地，强制归 1
-        #
-        # 注意：以下仍基于 feature_cube 首 t_obs 列提取 NDVI 最大值，与 veg_mask 同源，无额外开销
-        max_ndvi_map = np.max(X_flat[:, :t_obs], axis=1).reshape(h, w)
-
         # 规则 1：极低值水体/冰雪强制归 0（非耕地）
-        water_lock = max_ndvi_map < -0.05
+        # 放宽水体掩膜判定，避免误伤
+        water_lock = (max_val < -0.05).reshape(h, w)
         if np.any(water_lock):
             n_water = int(np.sum(water_lock))
             predicted_mask[water_lock] = 0

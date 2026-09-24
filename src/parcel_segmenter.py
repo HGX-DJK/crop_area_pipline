@@ -203,9 +203,25 @@ class ParcelSegmenter:
         else:
             cleaned = cropland_binary
 
-        # 填充内部孤立空洞（保证农田地块拓扑严密完整）
+        # 填充内部孤立微小空洞（仅闭合真实农田内部的微小车辙、积水与像元阴影，绝对禁止将村落街区作为"空洞"整体填补为耕地）
         if self.config.get("segmentation", {}).get("fill_internal_holes", True):
-            cleaned = ndimage.binary_fill_holes(cleaned).astype(np.uint8)
+            inverted = (cleaned == 0)
+            lbl_holes, n_holes = ndimage.label(inverted, structure=ndimage.generate_binary_structure(2, 1))
+            if n_holes > 0:
+                border_mask = np.zeros_like(cleaned, dtype=bool)
+                border_mask[0, :] = True
+                border_mask[-1, :] = True
+                border_mask[:, 0] = True
+                border_mask[:, -1] = True
+                edge_labels = set(np.unique(lbl_holes[border_mask]))
+                
+                hole_sizes = np.bincount(lbl_holes.ravel())
+                max_hole_pixels = 25 # 仅限闭合 25 像元 (约 3.5 亩) 以内的细小农田微空洞
+                fill_mask = np.zeros_like(cleaned, dtype=bool)
+                for h_id in range(1, n_holes + 1):
+                    if h_id not in edge_labels and hole_sizes[h_id] <= max_hole_pixels:
+                        fill_mask[lbl_holes == h_id] = True
+                cleaned[fill_mask] = 1
 
         # 4. 连通域标记（Connected Component Labeling）
         struct_conn = ndimage.generate_binary_structure(2, 2 if self.connectivity == 8 else 1)

@@ -204,6 +204,26 @@ class TimeSeriesBuilder:
         else:
             cv_feats = np.zeros((ts.shape[0], 2), dtype=np.float32)
 
+        # 8. 终极奥义：时序傅里叶谐波分析 (Fourier Harmonic Analysis)
+        # 通过 FFT 提取一年中 NDVI 时序曲线的“振幅”与“相位”，能完全无视云雾干扰，精准锁定一年一熟/两熟的农业种植节律。
+        # 仅在具备长时序 (T>=8) 物候周期时激活，避免超短快照 (如仅3天) 引入假高频震荡
+        if t_eff >= 8:
+            # 沿时间轴做 1D 快速傅里叶变换
+            fft_vals = np.fft.fft(ts_for_pheno, axis=1)
+            # 零频是均值（忽略），获取一阶频（基频，对应一年一熟）的振幅和相位
+            amp1 = np.abs(fft_vals[:, 1:2]) / t_eff
+            phase1 = np.angle(fft_vals[:, 1:2])
+            # 二阶频（倍频，对应一年两熟，如冬小麦-夏玉米轮作）的振幅和相位
+            if t_eff >= 12:
+                amp2 = np.abs(fft_vals[:, 2:3]) / t_eff
+                phase2 = np.angle(fft_vals[:, 2:3])
+            else:
+                amp2 = np.zeros_like(amp1)
+                phase2 = np.zeros_like(phase1)
+            fourier_feats = np.hstack([amp1, phase1, amp2, phase2]).astype(np.float32)
+        else:
+            fourier_feats = np.zeros((ts.shape[0], 4), dtype=np.float32)
+
         # 5. 组合全部特征向量：
         features = np.hstack([
             ts_for_pheno,
@@ -222,7 +242,8 @@ class TimeSeriesBuilder:
             paddy_v_index,
             lswi_feats,
             gcvi_feats,
-            cv_feats
+            cv_feats,
+            fourier_feats
         ])
 
         if is_3d:

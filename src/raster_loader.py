@@ -124,7 +124,6 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
     ndvi[is_mountain_veg] = np.minimum(ndvi[is_mountain_veg], 0.10)
     lswi[is_mountain_veg] = np.minimum(lswi[is_mountain_veg], -0.05)
     gcvi[is_mountain_veg] = np.minimum(gcvi[is_mountain_veg], 0.0)
-    
     gcvi[is_water_wetland] = np.minimum(gcvi[is_water_wetland], -0.5)
     gcvi[final_urban_mask] = np.minimum(gcvi[final_urban_mask], 0.0)
 
