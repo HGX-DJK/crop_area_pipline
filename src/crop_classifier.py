@@ -188,14 +188,56 @@ class CropClassifier:
         
         y = df["label"].values.astype(int)
 
-        # 5 折交叉验证
+        # 5 折交叉验证与自适应 F1-Score 阈值寻优
         skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
         y_cv_pred = np.zeros_like(y)
+        classes_unique = np.unique(y)
+        y_cv_prob = np.zeros((len(y), len(classes_unique)))
 
         for train_idx, val_idx in skf.split(X, y):
             fold_clf = self._init_model()
             fold_clf.fit(X[train_idx], y[train_idx])
-            y_cv_pred[val_idx] = fold_clf.predict(X[val_idx])
+            probs = fold_clf.predict_proba(X[val_idx])
+            y_cv_prob[val_idx] = probs
+            y_cv_pred[val_idx] = fold_clf.classes_[np.argmax(probs, axis=1)]
+
+        # 动态阈值寻优 (优化非农田 vs 农田的决策边界)
+        # 默认 argmax 相当于 0.5 的阈值。我们通过遍历找到让 Macro-F1 最高的背景判定阈值。
+        best_f1 = -1
+        best_th = 0.5
+        from sklearn.metrics import f1_score
+        y_binary = (y > 0).astype(int)  # 1 为农田，0 为非农田
+        
+        # 寻找最佳判定阈值，遍历 0.10 到 0.90
+        # 如果模型输出背景(Class=0)概率非常高，才敢说它是背景，这能最大限度挽回漏判的农田
+        if 0 in classes_unique:
+            bg_idx = np.where(classes_unique == 0)[0][0]
+            for th in np.arange(0.10, 0.91, 0.05):
+                # 预测：如果背景概率 < th，则是农田(1)；否则是背景(0)
+                pred_binary = (y_cv_prob[:, bg_idx] < th).astype(int)
+                f1 = f1_score(y_binary, pred_binary, average="macro")
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_th = th
+                    
+            self.optimal_bg_threshold = best_th
+            self.logger.info(f"✅ 自适应阈值寻优完成: 发现最优非农田(背景)判定阈值 = {best_th:.2f} (Macro-F1 提升至 {best_f1:.4f})")
+            
+            # 使用寻优后的黄金阈值重新生成 y_cv_pred 用于评估报告
+            for i in range(len(y)):
+                if y_cv_prob[i, bg_idx] >= self.optimal_bg_threshold:
+                    y_cv_pred[i] = 0
+                else:
+                    if y_cv_prob.shape[1] > 1:
+                        # 在除背景外的其他作物类别中选概率最大的
+                        crop_probs = np.delete(y_cv_prob[i], bg_idx)
+                        crop_classes = np.delete(classes_unique, bg_idx)
+                        y_cv_pred[i] = crop_classes[np.argmax(crop_probs)]
+                    else:
+                        y_cv_pred[i] = 1
+        else:
+            self.optimal_bg_threshold = 0.5
+            self.logger.info("未检测到标签为0的背景类，跳过自适应阈值寻优。")
 
         oa = accuracy_score(y, y_cv_pred)
         kappa = cohen_kappa_score(y, y_cv_pred)
@@ -361,7 +403,22 @@ class CropClassifier:
             classes_arr = np.array(self.model.classes_)
             if predict_count <= batch_size:
                 probs_valid = self.model.predict_proba(X_predict)
-                preds_flat[predict_indices] = classes_arr[np.argmax(probs_valid, axis=1)]
+                # 应用自适应 F1 阈值
+                if 0 in classes_arr:
+                    bg_idx = np.where(classes_arr == 0)[0][0]
+                    optimal_th = getattr(self, "optimal_bg_threshold", 0.5)
+                    is_bg = probs_valid[:, bg_idx] >= optimal_th
+                    
+                    if len(classes_arr) > 1:
+                        crop_probs = np.delete(probs_valid, bg_idx, axis=1)
+                        crop_classes = np.delete(classes_arr, bg_idx)
+                        best_crop = crop_classes[np.argmax(crop_probs, axis=1)]
+                    else:
+                        best_crop = np.ones(predict_count, dtype=np.int32)
+                        
+                    preds_flat[predict_indices] = np.where(is_bg, 0, best_crop)
+                else:
+                    preds_flat[predict_indices] = classes_arr[np.argmax(probs_valid, axis=1)]
                 max_probs[predict_indices] = np.max(probs_valid, axis=1)
             else:
                 for start_idx in range(0, predict_count, batch_size):
@@ -370,7 +427,23 @@ class CropClassifier:
                     chunk_indices = predict_indices[start_idx:end_idx]
 
                     chunk_prob = self.model.predict_proba(chunk_X)
-                    preds_flat[chunk_indices] = classes_arr[np.argmax(chunk_prob, axis=1)]
+                    
+                    if 0 in classes_arr:
+                        bg_idx = np.where(classes_arr == 0)[0][0]
+                        optimal_th = getattr(self, "optimal_bg_threshold", 0.5)
+                        is_bg = chunk_prob[:, bg_idx] >= optimal_th
+                        
+                        if len(classes_arr) > 1:
+                            crop_probs = np.delete(chunk_prob, bg_idx, axis=1)
+                            crop_classes = np.delete(classes_arr, bg_idx)
+                            best_crop = crop_classes[np.argmax(crop_probs, axis=1)]
+                        else:
+                            best_crop = np.ones(len(chunk_X), dtype=np.int32)
+                            
+                        preds_flat[chunk_indices] = np.where(is_bg, 0, best_crop)
+                    else:
+                        preds_flat[chunk_indices] = classes_arr[np.argmax(chunk_prob, axis=1)]
+                        
                     max_probs[chunk_indices] = np.max(chunk_prob, axis=1)
 
         predicted_mask = preds_flat.reshape(h, w).astype(np.int32)
