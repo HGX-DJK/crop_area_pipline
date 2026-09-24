@@ -355,6 +355,50 @@ class RasterLoader:
                     thumbnail = np.clip((thumbnail - vmin) / (vmax - vmin), 0.0, 1.0)
             return thumbnail
 
+    def load_multitemporal_thumbnail(self, tif_dir_or_list, max_dim: int = 1200) -> np.ndarray:
+        """
+        以极低内存极速读取多时相立体降采样立方体 (如 1200×1200×T)，
+        供先验底图融合 (Prior Fusion) 与全局物候约束使用，彻底避免全量载入时的 OOM。
+        """
+        if not HAS_RASTERIO:
+            return np.zeros((100, 100, 4), dtype=np.float32)
+
+        sorted_files, geo_info, _, is_multiband = self.get_multitemporal_metadata(tif_dir_or_list)
+        is_sdc6 = geo_info.get("is_sdc6", False)
+
+        with rasterio.open(sorted_files[0]) as ref_src:
+            step = max(1, max(ref_src.height, ref_src.width) // max_dim)
+            out_h = max(1, ref_src.height // step)
+            out_w = max(1, ref_src.width // step)
+
+        channels = []
+        for tif_p in sorted_files:
+            with rasterio.open(tif_p) as src:
+                if is_sdc6:
+                    b1 = src.read(1, out_shape=(out_h, out_w)).astype(np.float32)
+                    b2 = src.read(2, out_shape=(out_h, out_w)).astype(np.float32)
+                    b3 = src.read(3, out_shape=(out_h, out_w)).astype(np.float32)
+                    b4 = src.read(4, out_shape=(out_h, out_w)).astype(np.float32)
+                    b5 = src.read(5, out_shape=(out_h, out_w)).astype(np.float32)
+                    thumb_rows = np.arange(out_h, dtype=np.float32)[:, np.newaxis] * step
+                    thumb_cols = np.arange(out_w, dtype=np.float32)[np.newaxis, :] * step
+                    ndvi, lswi, _, _ = _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, thumb_rows, thumb_cols)
+                    channels.append(ndvi)
+                    channels.append(lswi)
+                else:
+                    if src.count >= 4:
+                        red = src.read(3, out_shape=(out_h, out_w)).astype(np.float32)
+                        nir = src.read(4, out_shape=(out_h, out_w)).astype(np.float32)
+                        ndvi = (nir - red) / (nir + red + 1e-6)
+                        channels.append(ndvi)
+                    else:
+                        ch = src.read(1, out_shape=(out_h, out_w)).astype(np.float32)
+                        channels.append(ch)
+
+        if channels:
+            return np.stack(channels, axis=2)
+        return np.zeros((out_h, out_w, len(sorted_files)), dtype=np.float32)
+
     def load_multitemporal_tifs(self, tif_dir_or_list):
         """
         从指定目录中读取多时相 GeoTIFF 影像，并按日历日（DOY）自动排序堆叠。

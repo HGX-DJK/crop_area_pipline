@@ -58,6 +58,15 @@ unbiased_area_inference:
   n_bootstrap: 2000            # Bootstrap 重抽样次数，用于构建 95% 置信区间
   confidence_level: 0.95       # 置信水平
 
+prior_reference:
+  enable: true                 # 是否启用权威开源先验底图融合 (借力武大 CLCD / 欧空局 WorldCereal)
+  provider: "clcd"             # 权威参考源: 'clcd' (武大黄昕), 'worldcereal' (欧空局), 'auto' (内置权威农学规则)
+  prior_tif_path: ""           # 本地权威底图文件路径 (留空则自动启用内置权威农学先验引擎)
+  fusion_weight: 0.6           # 贝叶斯融合权重 (0.0~1.0)
+  enable_hard_veto: true       # 是否启用先验一票否决 (彻底杜绝森林与高山荒草坡误判)
+  auto_mine_pseudo_samples: false # 是否基于先验自动提取高纯样本增强训练
+
+
 rotation_tracking:
   enabled: false               # 是否在主流程默认执行多年期轮作与撂荒分析（亦可通过命令行 --track-rotation 随时开启）
   early_year: 2020

@@ -201,6 +201,21 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
             crop_mask, conf_map = classifier.predict_raster_cube(feature_cube)
             logger.info(f"  -> 全域空间预测完成，平均分类置信度: {np.mean(conf_map) * 100:.1f}%。")
 
+    # 3.1 权威开源先验底图融合 (借力 CLCD / WorldCereal 权威成果)
+    prior_cfg = config.get("prior_reference", {})
+    if prior_cfg.get("enable", False):
+        logger.info("[步骤 2.5/5] 激活权威开源先验底图融合 (借力 CLCD/WorldCereal 成果)...")
+        from src.prior_fusion import PriorReferenceFusion
+        fusion_engine = PriorReferenceFusion(config, logger)
+        if input_mode == "geotiff" and sorted_files:
+            multitemp_cube = loader.load_multitemporal_thumbnail(sorted_files, max_dim=1200)
+            prior_map = fusion_engine.load_or_generate_prior_map(geo_info, multitemp_cube, ts_builder)
+        else:
+            prior_map = fusion_engine.load_or_generate_prior_map(geo_info, preview_cube, ts_builder)
+        conf_map = fusion_engine.fuse_prediction_with_prior(conf_map, prior_map)
+        crop_mask = (conf_map >= 0.50).astype(np.uint8)
+        logger.info(f"  -> 先验融合完成，全域有效候选耕地像元数: {int(np.sum(crop_mask)):,}。")
+
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）
     enable_obia = config.get("segmentation", {}).get("enable_obia", False)
     if enable_obia:
