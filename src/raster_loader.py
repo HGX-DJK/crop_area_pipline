@@ -67,12 +67,12 @@ def _compute_sdc6_physical_indices(b1, b2, b3, b4, b5, global_rows, global_cols)
     gcvi[valid_gcvi] = (b4[valid_gcvi] / b2[valid_gcvi]) - 1.0
     gcvi = np.clip(gcvi, -2.0, 10.0)
 
-    # 1. 纯水体物理吸收特征 (高 MNDWI，低近红外与低 NDVI，排除农田高含水作物误杀)
+    # 1. 纯水体与库区水体物理吸收特征 (MNDWI > 0.02 且低近红外，或负 NDVI)
     mndwi = (b2 - b5) / np.maximum(b2 + b5, 1e-4)
-    is_deep_water = ((mndwi > 0.15) & (ndvi < 0.10) & (b4 < 800.0)) | ((ndvi < -0.05) & (mndwi > 0.0))
-    ndvi[is_deep_water] = np.minimum(ndvi[is_deep_water], -0.20)
-    lswi[is_deep_water] = 0.50
-    gcvi[is_deep_water] = -1.0
+    is_water = ((mndwi > 0.02) & (b4 < 1200.0)) | ((ndvi < 0.0) & (mndwi > -0.05)) | (ndvi < -0.05)
+    ndvi[is_water] = np.minimum(ndvi[is_water], -0.30)
+    lswi[is_water] = 0.60
+    gcvi[is_water] = -1.0
 
     # 2. 空间纹理粗糙度 CV_B4 (近红外局域变异系数, 11x11 像元窗口约 330m x 330m):
     # 作为多维时序特征之一传递给 XGBoost，由模型自主区分林冠阴影与平原农田

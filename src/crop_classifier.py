@@ -40,12 +40,14 @@ class CropClassifier:
         if self.model_type == "xgboost":
             try:
                 import xgboost as xgb
+                scale_w = float(self.config.get("classification", {}).get("scale_pos_weight", 0.75))
                 return xgb.XGBClassifier(
                     n_estimators=self.n_estimators,
                     max_depth=min(self.max_depth, 8),
                     learning_rate=0.1,
                     subsample=0.8,
                     colsample_bytree=0.8,
+                    scale_pos_weight=scale_w,
                     tree_method="hist",
                     random_state=self.random_state,
                     n_jobs=self.n_jobs,
@@ -82,21 +84,25 @@ class CropClassifier:
         若传入 ts_builder，则通过特征工程模块对标定样点执行相同的物候特征提取。
         - 具备自动时相自适应对齐功能（无论输入是 1 个时相、多时相还是全时序，均自动对齐特征空间）。
         """
-        if training_csv_path and not os.path.isabs(training_csv_path) and not os.path.exists(training_csv_path):
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            cand = os.path.join(project_root, training_csv_path)
-            if os.path.exists(cand):
-                training_csv_path = cand
-
-        if not training_csv_path or not os.path.exists(training_csv_path):
-            self.logger.warning(f"未指定或未检测到外部训练样本数据文件 ({training_csv_path})。")
-            self.logger.info("  -> 自动激活智能物候指纹生成器：基于作物物候曲线库在内存中自动合成 200 个带真实抗噪波动的多时相标定样点...")
-            df = self._generate_synthetic_training_samples()
+        if isinstance(training_csv_path, pd.DataFrame):
+            df = training_csv_path.copy()
+            self.logger.info(f"  -> 载入高保真自适应内存训练样本集 (共 {len(df)} 个样点)...")
         else:
-            try:
-                df = pd.read_csv(training_csv_path, comment="#", encoding="utf-8")
-            except Exception:
-                df = pd.read_csv(training_csv_path, comment="#")
+            if training_csv_path and not os.path.isabs(training_csv_path) and not os.path.exists(training_csv_path):
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                cand = os.path.join(project_root, training_csv_path)
+                if os.path.exists(cand):
+                    training_csv_path = cand
+
+            if not training_csv_path or not os.path.exists(training_csv_path):
+                self.logger.warning(f"未指定或未检测到外部训练样本数据文件 ({training_csv_path})。")
+                self.logger.info("  -> 自动激活智能物候指纹生成器：基于作物物候曲线库在内存中自动合成 200 个带真实抗噪波动的多时相标定样点...")
+                df = self._generate_synthetic_training_samples()
+            else:
+                try:
+                    df = pd.read_csv(training_csv_path, comment="#", encoding="utf-8")
+                except Exception:
+                    df = pd.read_csv(training_csv_path, comment="#")
             if "point_id" in df.columns:
                 n_before = len(df)
                 df = df[~df["point_id"].astype(str).str.startswith("CH_")].reset_index(drop=True)
@@ -185,13 +191,20 @@ class CropClassifier:
                         # 农田：平整地块、内部均质度高 (0.015 ~ 0.038)
                         ts_cv[i, :] = np.random.uniform(0.015, 0.038, ts_values.shape[1])
                     else:
+                        is_canyon_scrub = ("灌" in c_name or "荒坡" in c_name or "河谷" in c_name or
+                                           (np.min(ts_values[i]) < 0.28 and np.max(ts_values[i]) > 0.65))
                         is_forest = ("林" in c_name or "山" in c_name or "树" in c_name or 
                                      (np.min(ts_values[i]) > 0.35 and np.max(ts_values[i]) > 0.55))
                         is_lawn = ("草坪" in c_name or "绿地" in c_name or 
                                    (np.ptp(ts_values[i]) < 0.15 and np.mean(ts_values[i]) > 0.45))
-                        is_water = ("水" in c_name or np.mean(ts_values[i]) < 0.0)
+                        is_water = ("水" in c_name or "消落" in c_name or np.mean(ts_values[i]) < 0.0)
 
-                        if is_forest:
+                        if is_canyon_scrub:
+                            # 干热河谷落叶灌丛/消落带：山体阴影起伏与地表粗糙度极高，冬春极度缺水 (LSWI < 0)
+                            ts_cv[i, :] = np.random.uniform(0.080, 0.220, ts_values.shape[1])
+                            ts_lswi[i, :] = np.clip(ts_values[i, :] - 0.40 + np.random.normal(0, 0.04, ts_values.shape[1]), -0.25, 0.30)
+                            ts_gcvi[i, :] = np.clip(ts_values[i, :] * 2.8 + np.random.normal(0, 0.2, ts_values.shape[1]), 0.2, 4.5)
+                        elif is_forest:
                             # 山地森林/野生林：山体阴阳坡起伏与林冠阴影导致近红外纹理剧烈起伏 (0.070 ~ 0.200)
                             ts_cv[i, :] = np.random.uniform(0.070, 0.200, ts_values.shape[1])
                             ts_lswi[i, :] = np.clip(ts_values[i, :] - 0.45 + np.random.normal(0, 0.05, ts_values.shape[1]), -0.10, 0.25)
@@ -310,7 +323,21 @@ class CropClassifier:
 
     def fit_from_arrays(self, X_train, y_train):
         """直接从特征矩阵与标签数组进行训练。"""
-        self.model.fit(X_train, y_train)
+        f = X_train.shape[1]
+        if f >= 36:
+            self.target_t = f - 28
+        elif f >= 28:
+            self.target_t = f - 24
+        else:
+            self.target_t = min(8, f // 3)
+
+        from sklearn.preprocessing import LabelEncoder
+        if self.model_type == "xgboost":
+            self.label_encoder = LabelEncoder()
+            y_encoded = self.label_encoder.fit_transform(y_train)
+            self.model.fit(X_train, y_encoded)
+        else:
+            self.model.fit(X_train, y_train)
         self.is_trained = True
         return self
 
@@ -340,10 +367,10 @@ class CropClassifier:
                 continue
             for k in range(n_per_class):
                 if cid == 0:
-                    # 非耕地：6 类地物覆盖，强制覆盖高 NDVI 自然植被（解决山地森林误判问题）
+                    # 非耕地：7 类地物覆盖，强制覆盖高 NDVI 自然植被（解决山地森林与干热河谷灌丛误判）
                     # 0: 水体/湿地   1: 裸地荒漠   2: 城镇不透水面
-                    # 3: 常绿阔叶林  4: 落叶林/稀树草原  5: 高山灌丛草甸
-                    sub_t = k % 6
+                    # 3: 常绿阔叶林  4: 落叶林/稀树草原  5: 干热河谷季风落叶荒灌  6: 高山灌丛草甸
+                    sub_t = k % 7
                     if sub_t == 0:
                         # 水体：NDVI 极低，负值或接近 0
                         water_val = np.random.uniform(-0.10, 0.05)
@@ -358,18 +385,21 @@ class CropClassifier:
                         ts_sample = np.clip(np.zeros(len(doys)) + urban_val + np.random.normal(0, 0.012, size=len(doys)), 0.04, 0.18)
                     elif sub_t == 3:
                         # ★ 常绿阔叶林/针叶林：全年高 NDVI (0.55~0.80)，极稳定，无明显生长峰谷
-                        # 与耕地的关键区别：时序方差极小（forest_std ≈ 0.02，cropland_std ≈ 0.15+）
                         forest_val = np.random.uniform(0.55, 0.78)
                         noise_forest = np.random.normal(0, 0.015, size=len(doys))
                         ts_sample = np.clip(np.zeros(len(doys)) + forest_val + noise_forest, 0.45, 0.85)
                     elif sub_t == 4:
                         # ★ 落叶林/稀树草原：有季节变化但峰值形态不同（宽缓平台 vs 农作物尖峰）
-                        # 春夏绿期 NDVI 0.45~0.65，秋冬落叶后 NDVI 降至 0.10~0.25
                         deciduous_base = [0.25, 0.45, 0.58, 0.65, 0.62, 0.52, 0.32, 0.18]
                         noise = np.random.normal(0.0, 0.025, size=len(doys))
                         ts_sample = np.clip(np.array(deciduous_base) + noise, 0.08, 0.72)
+                    elif sub_t == 5:
+                        # ★ 干热河谷季节性落叶灌丛/荒草坡：冬春极旱低谷 (0.16~0.25)，夏季雨季暴绿 (0.75~0.85)，秋季骤落
+                        canyon_scrub_base = [0.20, 0.22, 0.45, 0.78, 0.82, 0.65, 0.35, 0.22]
+                        noise = np.random.normal(0.0, 0.02, size=len(doys))
+                        ts_sample = np.clip(np.array(canyon_scrub_base) + noise, 0.12, 0.88)
                     else:
-                        # ★ 高山灌丛/草甸：中等 NDVI (0.25~0.50)，生长曲线宽缓，无农作物的陡峭拔节峰值
+                        # ★ 高山灌丛/草甸：中等 NDVI (0.25~0.50)，生长曲线宽缓
                         shrub_base = [0.20, 0.32, 0.42, 0.50, 0.48, 0.38, 0.28, 0.20]
                         noise = np.random.normal(0.0, 0.02, size=len(doys))
                         ts_sample = np.clip(np.array(shrub_base) + noise, 0.12, 0.58)
@@ -433,35 +463,45 @@ class CropClassifier:
         # ★ 关键修正：不再使用容易错位的 t_obs 切片。
         # 在 time_series_builder 中，ts_for_pheno 的长度为 t_eff。紧接着它的那一列必定是 ndvi_max。
         # 如果我们不知道 t_eff，安全起见，我们直接计算前几列的最大值，或者直接把 0.18 的限制放宽。
-        # 既然 XGBoost 已经足够强大，我们可以把前置的硬掩膜 veg_th 降低到 0.10，仅仅用于过滤纯粹的水体和深阴影。
-        t_eff = getattr(self, "target_t", 3) 
-        # 遥感农学物理硬阈值过滤 (Agronomic Physical Barrier):
-        # 旺季活跃农作物 NDVI 峰值必然 >= 0.30；沥青、建筑硬化面、裸岩与阴影像元物理上绝非农田
+        if hasattr(self, "target_t") and self.target_t is not None:
+            t_eff = self.target_t
+        elif f >= 36:
+            t_eff = f - 28
+        elif f >= 28:
+            t_eff = f - 24
+        else:
+            t_eff = min(8, f // 3)
+
+        # 方案 A 阶段 1：物理非植被初筛器 (Physical Coarse Masking)
+        # 旺季活跃农作物 NDVI 峰值必然 >= 0.28；纯水体、湿地、建筑沥青、裸岩与阴影像元物理上绝非农田
         max_val = np.max(X_flat[:, :min(t_eff+5, f//2)], axis=1) 
-        veg_th = 0.30 
+        veg_th = 0.28 
         veg_mask = (max_val >= veg_th)
 
         predict_mask = valid_mask & veg_mask
         predict_count = int(np.sum(predict_mask))
 
         preds_flat = np.zeros(total_pixels, dtype=np.int32)
-        # 对非植被/水体海洋像元，默认赋予 1.0 置信度（高度确信是非农田背景）
+        crop_probs_flat = np.zeros(total_pixels, dtype=np.float32)
         max_probs = np.ones(total_pixels, dtype=np.float32)
 
         if predict_count > 0:
             predict_indices = np.where(predict_mask)[0]
             X_predict = X_flat[predict_indices]
 
-            # 针对真实具备植被特征的候选农田像元执行流式推断
-            classes_arr = np.array(self.model.classes_)
+            # 方案 A 阶段 2：候选植被高维作物精分 (XGBoost Fine Discrimination)
+            if hasattr(self, "label_encoder") and self.label_encoder is not None:
+                classes_arr = self.label_encoder.inverse_transform(self.model.classes_)
+            else:
+                classes_arr = np.array(self.model.classes_)
             if predict_count <= batch_size:
                 probs_valid = self.model.predict_proba(X_predict)
-                # 应用自适应 F1 阈值
                 if 0 in classes_arr:
                     bg_idx = np.where(classes_arr == 0)[0][0]
                     optimal_th = getattr(self, "optimal_bg_threshold", 0.5)
                     safe_th = float(np.clip(optimal_th, 0.40, 0.60))
                     is_bg = probs_valid[:, bg_idx] >= safe_th
+                    crop_p = np.clip(1.0 - probs_valid[:, bg_idx], 0.0, 1.0)
                     
                     if len(classes_arr) > 1:
                         crop_probs = np.delete(probs_valid, bg_idx, axis=1)
@@ -471,8 +511,10 @@ class CropClassifier:
                         best_crop = np.ones(predict_count, dtype=np.int32)
                         
                     preds_flat[predict_indices] = np.where(is_bg, 0, best_crop)
+                    crop_probs_flat[predict_indices] = crop_p
                 else:
                     preds_flat[predict_indices] = classes_arr[np.argmax(probs_valid, axis=1)]
+                    crop_probs_flat[predict_indices] = np.max(probs_valid, axis=1)
                 max_probs[predict_indices] = np.max(probs_valid, axis=1)
             else:
                 for start_idx in range(0, predict_count, batch_size):
@@ -487,6 +529,7 @@ class CropClassifier:
                         optimal_th = getattr(self, "optimal_bg_threshold", 0.5)
                         safe_th = float(np.clip(optimal_th, 0.40, 0.60))
                         is_bg = chunk_prob[:, bg_idx] >= safe_th
+                        chunk_crop_p = np.clip(1.0 - chunk_prob[:, bg_idx], 0.0, 1.0)
                         
                         if len(classes_arr) > 1:
                             crop_probs = np.delete(chunk_prob, bg_idx, axis=1)
@@ -496,8 +539,10 @@ class CropClassifier:
                             best_crop = np.ones(len(chunk_X), dtype=np.int32)
                             
                         preds_flat[chunk_indices] = np.where(is_bg, 0, best_crop)
+                        crop_probs_flat[chunk_indices] = chunk_crop_p
                     else:
                         preds_flat[chunk_indices] = classes_arr[np.argmax(chunk_prob, axis=1)]
+                        crop_probs_flat[chunk_indices] = np.max(chunk_prob, axis=1)
                         
                     max_probs[chunk_indices] = np.max(chunk_prob, axis=1)
 
@@ -511,46 +556,58 @@ class CropClassifier:
         #    ndvi_range < 0.18 且 ndvi_max < 0.65 -> 判定为草坪，强制归 0
         crop_cand = (preds_flat > 0)
         if np.any(crop_cand):
-            ndvi_max_col = t_eff
-            ndvi_min_col = t_eff + 1
-            ndvi_range_col = t_eff + 2
-            
-            if f > ndvi_range_col:
-                p_max = X_flat[:, ndvi_max_col]
-                p_min = X_flat[:, ndvi_min_col]
-                p_range = X_flat[:, ndvi_range_col]
-            else:
-                ts_slice = X_flat[:, :t_eff]
-                p_max = np.max(ts_slice, axis=1)
-                p_min = np.min(ts_slice, axis=1)
-                p_range = p_max - p_min
+            ts_slice = X_flat[:, :t_eff]
+            p_max = np.max(ts_slice, axis=1)
+            p_min = np.min(ts_slice, axis=1)
+            p_mean = np.mean(ts_slice, axis=1)
+            p_range = p_max - p_min
 
-            basic_valid = (p_max >= 0.35) & ((p_min <= 0.35) | (p_range >= 0.25))
+            # 核心物理约束 1：旺季生长峰值与年内收割/翻耕低谷
+            # 真实农田必须达到起码的冠层绿度 (p_max >= 0.42)，且必须有翻耕收获休耕低谷 (p_min <= 0.38) 与年内起伏 (p_range >= 0.20)
+            # 全年最低 NDVI 仍 >= 0.42，或全年均值 >= 0.58 的像元，在自然界 100% 属于常绿林冠与多年生乔木林！
+            basic_valid = (p_max >= 0.42) & (p_min <= 0.38) & (p_range >= 0.20)
+            is_dense_forest = (p_min >= 0.42) | (p_mean >= 0.58)
+
+            # 核心物理约束 2：微观林冠粗糙度与树阴异质度 (CV_B4 拦截)
+            # 农田地表平整均质 (CV < 0.10)，天然林地树冠起伏、阴影杂乱 (CV 通常 > 0.15)
+            # cv_feats 位于特征矩阵的 t_eff + 17 列 (cv_mean)
+            cv_col = t_eff + 17
+            if f > cv_col:
+                cv_mean_val = X_flat[:, cv_col]
+                # 局域近红外变异系数超过 0.15 的像元判定为粗糙林冠/山坡杂灌
+                is_rough_canopy = (cv_mean_val > 0.15)
+            else:
+                is_rough_canopy = np.zeros(len(X_flat), dtype=bool)
+
             if t_eff >= 3:
                 ts_early = X_flat[:, 0]
                 ts_mid = X_flat[:, t_eff // 2]
                 ts_late = X_flat[:, t_eff - 1]
-                is_forest = (ts_early >= 0.38) & (ts_mid >= 0.65) & (ts_late >= 0.55) & (p_range < 0.28)
+                # 排除高山常绿阔叶/针叶林与平坦草坪
+                is_forest = is_dense_forest | ((ts_early >= 0.38) & (ts_mid >= 0.65) & (ts_late >= 0.55) & (p_range < 0.28))
                 is_lawn = (p_range < 0.18) & (p_max < 0.65)
-                invalid_crop = crop_cand & ((~basic_valid) | is_forest | is_lawn)
+                # ★ 排除干热河谷季风落叶荒灌/消落带 (冬春极度枯黄低谷 <=0.24，仅夏季雨季暴绿但缺乏全年生长管护)
+                is_canyon_scrub = (p_min <= 0.24) & (p_max >= 0.65) & (ts_early <= 0.26) & (ts_mid >= 0.70)
+                invalid_crop = crop_cand & ((~basic_valid) | is_rough_canopy | is_forest | is_lawn | is_canyon_scrub)
             else:
-                invalid_crop = crop_cand & (~basic_valid)
+                invalid_crop = crop_cand & ((~basic_valid) | is_rough_canopy | is_dense_forest)
 
             if np.any(invalid_crop):
                 preds_flat[invalid_crop] = 0
+                crop_probs_flat[invalid_crop] = 0.0
                 max_probs[invalid_crop] = 1.0
 
         predicted_mask = preds_flat.reshape(h, w).astype(np.int32)
-        confidence_map = max_probs.reshape(h, w).astype(np.float32)
+        confidence_map = crop_probs_flat.reshape(h, w).astype(np.float32)
 
-        # 规则 1：极低值水体/冰雪强制归 0（非耕地）
-        # 放宽水体掩膜判定，避免误伤
-        water_lock = (max_val < -0.05).reshape(h, w)
+        # 规则 1：极低值水体/冰雪/消落带强制归 0（非耕地）
+        min_val = np.min(X_flat[:, :t_eff], axis=1)
+        water_lock = ((max_val < 0.08) | (min_val < -0.15)).reshape(h, w)
         if np.any(water_lock):
             n_water = int(np.sum(water_lock))
             predicted_mask[water_lock] = 0
-            confidence_map[water_lock] = 1.0
-            self.logger.debug(f"  [物理约束-R1] NDVI<-0.05 水体/冰雪强制归 0：{n_water} 像元")
+            confidence_map[water_lock] = 0.0
+            self.logger.debug(f"  [物理约束-R1] 水体/消落带强制归 0：{n_water} 像元")
 
         return predicted_mask, confidence_map
 

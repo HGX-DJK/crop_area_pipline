@@ -44,27 +44,125 @@ class PriorReferenceFusion:
         self.enable_hard_veto = bool(self.prior_cfg.get("enable_hard_veto", True))
         self.prior_tif_path = self.prior_cfg.get("prior_tif_path", None)
 
+        # 地形物理阻断配置 (DEM 高程与坡度硬约束，彻底消除高山雪山与悬崖误判)
+        self.topo_cfg = self.config.get("topography", {})
+        self.enable_dem_mask = bool(self.topo_cfg.get("enable_dem_mask", False))
+        self.dem_tif_path = self.topo_cfg.get("dem_tif_path", None)
+        self.max_elevation_m = float(self.topo_cfg.get("max_elevation_m", 1800.0))
+        self.max_slope_deg = float(self.topo_cfg.get("max_slope_deg", 25.0))
+        self._cached_dem_mask = None
+
+    def load_dem_veto_mask(self, geo_info=None, target_h=None, target_w=None) -> np.ndarray:
+        """
+        加载并空间对齐 30m DEM 与坡度物理面具，执行高程 (> max_elevation_m) 与坡度 (> max_slope_deg) 物理拦截。
+        返回 (target_h, target_w) 的布尔掩膜，True 代表属于高山深山/陡坡一票否决区。
+        """
+        if not self.enable_dem_mask or not self.dem_tif_path:
+            return None
+
+        if self._cached_dem_mask is not None:
+            if target_h is None or self._cached_dem_mask.shape == (target_h, target_w):
+                return self._cached_dem_mask
+
+        dem_path = self.dem_tif_path
+        if not os.path.exists(dem_path):
+            candidates = [
+                os.path.join(os.getcwd(), dem_path),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), dem_path),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "dem_and_slope.tif")
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    dem_path = c
+                    break
+
+        if not os.path.exists(dem_path):
+            self.logger.warning(f"DEM 掩膜已开启，但未找到文件: {self.dem_tif_path}，跳过地形硬否决。")
+            return None
+
+        h = target_h if target_h is not None else (geo_info["height"] if geo_info else 3660)
+        w = target_w if target_w is not None else (geo_info["width"] if geo_info else 3660)
+        target_crs = geo_info.get("crs", None) if geo_info else None
+        target_transform = geo_info.get("transform", None) if geo_info else None
+
+        try:
+            with rasterio.open(dem_path) as src:
+                if src.height == h and src.width == w and (target_crs is None or str(src.crs) == str(target_crs)):
+                    elev = src.read(1)
+                    slope = src.read(2) if src.count >= 2 else None
+                else:
+                    elev = np.zeros((h, w), dtype=np.float32)
+                    reproject(
+                        source=src.read(1),
+                        destination=elev,
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=target_transform,
+                        dst_crs=target_crs if target_crs else src.crs,
+                        resampling=Resampling.bilinear
+                    )
+                    if src.count >= 2:
+                        slope = np.zeros((h, w), dtype=np.float32)
+                        reproject(
+                            source=src.read(2),
+                            destination=slope,
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=target_transform,
+                            dst_crs=target_crs if target_crs else src.crs,
+                            resampling=Resampling.bilinear
+                        )
+                    else:
+                        slope = None
+
+                if slope is None:
+                    res_m = float(self.config.get("spatial", {}).get("resolution_meters", 30.0))
+                    gy, gx = np.gradient(elev, res_m)
+                    slope = np.degrees(np.arctan(np.sqrt(gx**2 + gy**2)))
+
+                veto_mask = (elev > self.max_elevation_m) | (slope > self.max_slope_deg)
+                n_veto = int(np.sum(veto_mask))
+                self.logger.info(
+                    f"  -> DEM 地形掩膜加载完成: 设定海拔上限 {self.max_elevation_m}m, 坡度上限 {self.max_slope_deg}° "
+                    f"(物理否决 {n_veto:,} 个高山深山像元, 占比 {n_veto / veto_mask.size * 100:.1f}%)"
+                )
+                self._cached_dem_mask = veto_mask
+                return veto_mask
+        except Exception as e:
+            self.logger.warning(f"读取/投影 DEM 掩膜时发生异常: {e}，跳过地形硬否决。")
+            return None
+
     def load_or_generate_prior_map(self, geo_info, raster_cube=None, ts_builder=None) -> np.ndarray:
         """
         获取与当前卫星影像空间尺寸完全对齐的 [0, 1] 耕地先验概率矩阵。
         若配置了本地权威 TIF (CLCD/WorldCereal/FROM-GLC10)，则自动重投影对齐；
         若未提供本地 TIF，则基于 CLCD/WorldCereal 权威农学物理先验在时序中合成高纯度先验底图。
+        若开启了 DEM 掩膜，无条件将高海拔与陡坡深山压制为 0。
         """
-        target_h = geo_info["height"]
-        target_w = geo_info["width"]
-        target_crs = geo_info["crs"]
-        target_transform = geo_info.get("transform", None)
+        target_h = geo_info["height"] if geo_info else (raster_cube.shape[0] if raster_cube is not None else 120)
+        target_w = geo_info["width"] if geo_info else (raster_cube.shape[1] if raster_cube is not None else 120)
+        target_crs = geo_info.get("crs", "EPSG:32650") if geo_info else "EPSG:32650"
+        target_transform = geo_info.get("transform", None) if geo_info else None
 
         if self.prior_tif_path and os.path.exists(self.prior_tif_path):
             self.logger.info(f"正在加载并空间对齐权威开源先验底图: {self.prior_tif_path} ({self.provider.upper()})...")
             prior_prob = self._reproject_external_prior(
                 self.prior_tif_path, target_crs, target_transform, target_h, target_w
             )
-            return prior_prob
+        else:
+            # 若未提供外部 TIF，启用基于权威科研文献规则的内置先验引擎
+            self.logger.info("未指定外部先验 TIF，自动激活内置权威先验引擎 (集成 CLCD / WorldCereal 农学物候与短波红外规则)...")
+            prior_prob = self._generate_builtin_prior(raster_cube, ts_builder, target_h, target_w)
 
-        # 若未提供外部 TIF，启用基于权威科研文献规则的内置先验引擎
-        self.logger.info("未指定外部先验 TIF，自动激活内置权威先验引擎 (集成 CLCD / WorldCereal 农学物候与短波红外规则)...")
-        return self._generate_builtin_prior(raster_cube, ts_builder, target_h, target_w)
+        # 融合 DEM 地形物理掩膜一票否决
+        dem_mask = self.load_dem_veto_mask(geo_info, target_h, target_w)
+        if dem_mask is not None:
+            if dem_mask.shape != prior_prob.shape:
+                import cv2
+                dem_mask = cv2.resize(dem_mask.astype(np.uint8), (prior_prob.shape[1], prior_prob.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+            prior_prob[dem_mask] = 0.0
+
+        return prior_prob
 
     def _reproject_external_prior(self, tif_path, target_crs, target_transform, target_h, target_w) -> np.ndarray:
         """读取外部 TIF 并重投影到目标影像尺寸，转化为 [0, 1] 耕地先验置信度"""
@@ -145,43 +243,63 @@ class PriorReferenceFusion:
         # 初始化中性先验 0.5 (与当前传入矩阵尺寸对齐)
         prior = np.full((cur_h, cur_w), 0.5, dtype=np.float32)
 
-        # 1. 纯水体/深阴影/裸岩抑制
+        # 1. 纯水体/深阴影/裸岩/山地瘠薄杂灌抑制
+        # 农田在旺季生长峰值必然具备显著绿度 (max_ndvi >= 0.42) 与轮作收割振幅 (range_ndvi >= 0.20)
+        # 全年峰值不足 0.42 或全年起伏不足 0.20 的山区植被，物理上绝非健康农田，直接压制为非耕地
         prior[mean_ndvi < 0.20] = 0.01
+        prior[max_ndvi < 0.42] = 0.01
+        prior[(range_ndvi < 0.20) & (max_ndvi < 0.60)] = 0.02
 
-        # 2. 天然常绿山地森林抑制 (Forest Veto)
-        # 农学与遥感物理法则：一年生农作物必有收割/翻耕/休耕阶段，深冬（1月）四川盆地及丘陵越冬作物仍处于苗期(NDVI普遍<0.50)。
-        # 全年 4 个生长季中，最低 NDVI 仍 >= 0.56，或全年均值 >= 0.68 且最低 >= 0.50 的像元，
-        # 在物理上 100% 属于常绿阔叶林、针阔混交林或深山原生林冠，绝非农田！
-        is_dense_forest = (min_ndvi >= 0.56) | ((mean_ndvi >= 0.68) & (min_ndvi >= 0.50))
+        # 2. 天然常绿/半常绿山地森林与多年生林木绝杀 (Forest Veto)
+        # 农学与遥感物理不可违背法则：一年生农作物必有收割/翻耕/休耕阶段，全年最低 NDVI 必然 <= 0.38。
+        # 全年 4 个时相中，最低 NDVI 仍 >= 0.42，或全年均值 >= 0.58 的像元，
+        # 在物理上 100% 属于常绿针叶林、常绿/落叶针阔混交林或深山原生林冠，绝非农田！
+        is_dense_forest = (min_ndvi >= 0.42) | (mean_ndvi >= 0.58)
         prior[is_dense_forest] = 0.01
 
-        # 3. 权威欧空局/武大草地先验：亚高山野生草坡与灌丛草甸抑制
-        # 高山草坡特征：夏季与晚秋短波红外含水指数(LSWI)极高，春季萌发早(NDVI2>0.70)，无农田收割晾干期
+        # 3. 纯水体与水库消落带绝对硬压制
+        prior[min_ndvi < 0.0] = 0.00
+        prior[max_ndvi < 0.25] = 0.00
+
+        # 4. 亚高山野生草坡与干热河谷季节性落叶灌丛/荒坡抑制 (Canyon Scrub & Meadow Veto)
+        # 川西干热河谷特有生态：冬春极旱 (NDVI <= 0.28, LSWI < 0)，夏季雨季暴绿 (NDVI >= 0.65)，
+        # 此类野生旱生落叶刺灌丛/荒草坡绝非农田，必须坚决压制为非耕地
         if ts_lswi is not None and ts_ndvi.shape[2] >= 4:
             nd1, nd2, nd3, nd4 = ts_ndvi[:, :, 0], ts_ndvi[:, :, 1], ts_ndvi[:, :, 2], ts_ndvi[:, :, 3]
             lw1, lw2, lw3, lw4 = ts_lswi[:, :, 0], ts_lswi[:, :, 1], ts_lswi[:, :, 2], ts_lswi[:, :, 3]
 
-            # 高山湿生草甸/高山灌丛判别准则 (CLCD 草地类别定义)
+            # 高山湿生草甸 (夏季与秋季水分充沛)
             is_alpine_meadow = (lw2 > 0.12) & (lw4 > 0.14) & (nd2 > 0.68) & (nd4 > 0.66)
             prior[is_alpine_meadow] = 0.02
 
-            # 4. 西南丘陵山地越冬两熟梯田增强准则 (冬油菜/小麦 -> 夏季稻谷/玉米)
-            # 1月为越冬绿苗 (NDVI 0.45~0.58)，4月灌浆成熟期 LSWI 显著降低 (秸秆脱水成熟，LSWI < 0.10)
-            is_mountain_terrace = (
-                (nd1 > 0.45) & (nd2 > 0.58) & (nd3 > 0.80) &
-                (lw2 < 0.10) & (range_ndvi >= 0.25)
+            # 干热河谷季节性旱生落叶灌丛/荒坡 (冬春水分亏缺，夏季雨季骤绿)
+            is_dry_canyon_scrub = (min_ndvi <= 0.28) & ((lw1 < 0.0) | (lw2 < 0.0)) & (nd3 >= 0.60)
+            prior[is_dry_canyon_scrub] = 0.01
+
+            # 真正西南丘陵山地两熟/单季农田先验 (需具备农田水分或适度冬绿冠层)
+            is_real_crop = (
+                (~is_dense_forest) & (~is_dry_canyon_scrub) & (~is_alpine_meadow) &
+                (nd3 >= 0.55) & (range_ndvi >= 0.25) & (min_ndvi <= 0.38) &
+                (lw3 >= 0.05)  # 生长旺季农田具备起码的水分保障
             )
-            prior[is_mountain_terrace] = 0.95
+            prior[is_real_crop] = 0.75
         elif ts_ndvi.shape[2] >= 4:
             doy1_nd = ts_ndvi[:, :, 0]
             doy2_nd = ts_ndvi[:, :, 1]
             doy3_nd = ts_ndvi[:, :, 2]
             doy4_nd = ts_ndvi[:, :, 3]
-            is_alpine_meadow = (doy3_nd > 0.82) & (doy4_nd > 0.68) & (doy1_nd < 0.50) & (range_ndvi < 0.38)
-            prior[is_alpine_meadow] = 0.03
 
-            is_mountain_terrace = (doy1_nd > 0.45) & (doy2_nd > 0.58) & (doy3_nd > 0.80) & (range_ndvi >= 0.30)
-            prior[is_mountain_terrace] = 0.92
+            is_alpine_meadow = (doy3_nd > 0.82) & (doy4_nd > 0.68) & (doy1_nd < 0.50) & (range_ndvi < 0.38)
+            prior[is_alpine_meadow] = 0.02
+
+            is_dry_canyon_scrub = (min_ndvi <= 0.26) & (range_ndvi >= 0.40) & (mean_ndvi <= 0.50)
+            prior[is_dry_canyon_scrub] = 0.01
+
+            is_real_crop = (
+                (~is_dense_forest) & (~is_dry_canyon_scrub) & (~is_alpine_meadow) &
+                (doy3_nd >= 0.55) & (range_ndvi >= 0.25) & (min_ndvi <= 0.38)
+            )
+            prior[is_real_crop] = 0.75
 
         # 缩略图模式空间分辨率自适应放大 (从 1200 放大至目标全幅 3660)
         if (cur_h, cur_w) != (h, w):
@@ -222,6 +340,17 @@ class PriorReferenceFusion:
             if n_veto > 0:
                 self.logger.info(f"  -> 先验一票否决机制生效: 成功拦截 {n_veto:,} 个被误判的高山荒草坡/森林/水体像元！")
 
+        # 3. DEM 地形硬掩膜终极物理一票否决 (高程与坡度物理不可逆法则)
+        if self.enable_dem_mask:
+            dem_mask = self.load_dem_veto_mask(None, prob_local.shape[0], prob_local.shape[1])
+            if dem_mask is not None:
+                if dem_mask.shape != prob_local.shape:
+                    import cv2
+                    dem_mask = cv2.resize(dem_mask.astype(np.uint8), (prob_local.shape[1], prob_local.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+                p_base[dem_mask] = 0.0
+                n_dem_veto = int(np.sum(dem_mask))
+                self.logger.info(f"  -> DEM 地形物理面具生效: 100% 物理拦截 {n_dem_veto:,} 个高海拔/陡坡深山像元！")
+
         return np.clip(p_base, 0.0, 1.0)
 
     def mine_prior_training_samples(
@@ -235,11 +364,17 @@ class PriorReferenceFusion:
         """
         基于权威先验底图自动挖掘高纯度正负样本（Prior-Guided Self-Training）。
         免去人工野外标注与调参，自动提取真实像元光谱时序：
-        - 正样本：高先验梯田像元 (P_prior > 0.90)
+        - 正样本：高先验梯田像元 (P_prior > 0.90 且受 DEM 物理掩膜保护)
         - 负样本：高山荒草坡、常绿森林等极易混淆背景 (P_prior < 0.05)
         """
         self.logger.info("正在基于权威开源先验底图自动挖掘高纯度正负标定样点...")
+        if raster_cube.ndim == 2:
+            raster_cube = raster_cube[:, :, np.newaxis]
         h, w, n_bands = raster_cube.shape
+        if prior_map.shape[:2] != (h, w):
+            import cv2
+            prior_map = cv2.resize(prior_map.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
+
         if n_bands >= 8:
             ts_ndvi = raster_cube[:, :, 0::2]
         elif n_bands >= 4:
@@ -250,17 +385,31 @@ class PriorReferenceFusion:
         n_dates = ts_ndvi.shape[2]
         doys = doy_list if (doy_list and len(doy_list) == n_dates) else [i + 1 for i in range(n_dates)]
 
-        # 1. 挖掘高纯度山地梯田正样本 (Prior > 0.90)
-        pos_mask = (prior_map >= 0.90)
+        # 1. 挖掘高纯度农田正样本 (Prior >= 0.70 且坚决排除极旱荒灌与陡坡)
+        is_dry_canyon_scrub = (np.min(ts_ndvi, axis=2) <= 0.28) & (np.max(ts_ndvi, axis=2) >= 0.60)
+        pos_mask = (prior_map >= 0.70) & (np.min(ts_ndvi, axis=2) <= 0.38) & (~is_dry_canyon_scrub)
+        if self.enable_dem_mask:
+            dem_mask = self.load_dem_veto_mask(None, h, w)
+            if dem_mask is not None:
+                if dem_mask.shape != (h, w):
+                    import cv2
+                    dem_mask = cv2.resize(dem_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+                pos_mask = pos_mask & (~dem_mask)
         pos_indices = np.argwhere(pos_mask)
 
-        # 2. 挖掘高纯度高山野生草坡与林地负样本 (Prior <= 0.05)
-        # 特别关注夏季高 NDVI 但被权威先验否决的草坡负样本
-        neg_meadow_mask = (prior_map <= 0.05) & (np.max(ts_ndvi, axis=2) >= 0.70)
-        neg_forest_mask = (prior_map <= 0.05) & (np.min(ts_ndvi, axis=2) >= 0.50)
+        # 2. 挖掘高纯度复杂背景负样本 (Prior <= 0.05)
+        # 重点覆盖四大易混淆非耕地：
+        # (1) 干热河谷季节性落叶灌丛/荒坡 (冬春低绿、夏季暴绿、缺水)
+        neg_canyon_scrub = (prior_map <= 0.05) & is_dry_canyon_scrub
+        # (2) 高山野生草坡 (夏季高 NDVI)
+        neg_meadow_mask = (prior_map <= 0.05) & (np.max(ts_ndvi, axis=2) >= 0.70) & (~is_dry_canyon_scrub)
+        # (3) 常绿森林
+        neg_forest_mask = (prior_map <= 0.05) & (np.min(ts_ndvi, axis=2) >= 0.45)
+        # (4) 库区水体与消落带
+        neg_water_mask = (prior_map <= 0.02) & (np.min(ts_ndvi, axis=2) <= 0.05)
         neg_other_mask = (prior_map <= 0.02)
 
-        neg_indices = np.argwhere(neg_meadow_mask | neg_forest_mask | neg_other_mask)
+        neg_indices = np.argwhere(neg_canyon_scrub | neg_meadow_mask | neg_forest_mask | neg_water_mask | neg_other_mask)
 
         records = []
         p_count = 0
@@ -286,7 +435,14 @@ class PriorReferenceFusion:
             chosen = neg_indices[np.random.choice(len(neg_indices), sample_size, replace=False)]
             for r, c in chosen:
                 p_count += 1
-                cname = "高山野生草坡" if np.max(ts_ndvi[r, c]) >= 0.75 else "常绿森林/背景"
+                if neg_canyon_scrub[r, c]:
+                    cname = "干热河谷落叶灌丛/荒坡"
+                elif neg_water_mask[r, c]:
+                    cname = "库区水体/消落带"
+                elif np.max(ts_ndvi[r, c]) >= 0.75:
+                    cname = "高山野生草坡"
+                else:
+                    cname = "常绿森林/背景"
                 row = {
                     "point_id": f"PRIOR_NEG_{p_count:04d}",
                     "label": 0,
@@ -299,6 +455,72 @@ class PriorReferenceFusion:
         df_mined = pd.DataFrame(records)
         self.logger.info(
             f"  -> 自动挖掘完成！共生成 {len(df_mined)} 个实测高纯度样本 "
-            f"(耕地正样本: {len(df_mined[df_mined['label']==1])} 个, 复杂背景负样本: {len(df_mined[df_mined['label']==0])} 个)。"
+            f"(耕地正样本: {len(df_mined[df_mined['label']==1]) if len(df_mined) else 0} 个, "
+            f"复杂背景负样本: {len(df_mined[df_mined['label']==0]) if len(df_mined) else 0} 个)。"
         )
         return df_mined
+
+    def merge_training_samples(
+        self,
+        base_samples_path_or_df,
+        df_mined: pd.DataFrame,
+        doy_list: list = None
+    ) -> pd.DataFrame:
+        """
+        将全局基准样本与当前场景挖掘的高纯度伪标签样点对齐并合并。
+        自动将基准样本的 DOY 插值对齐至当前影像的 doy_list，确保多源特征维度完全一致。
+        """
+        if df_mined is None or len(df_mined) == 0:
+            if isinstance(base_samples_path_or_df, pd.DataFrame):
+                return base_samples_path_or_df
+            return pd.read_csv(base_samples_path_or_df, comment="#")
+
+        if isinstance(base_samples_path_or_df, pd.DataFrame):
+            df_base = base_samples_path_or_df.copy()
+        else:
+            if not os.path.isabs(base_samples_path_or_df) and not os.path.exists(base_samples_path_or_df):
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                cand = os.path.join(project_root, base_samples_path_or_df)
+                if os.path.exists(cand):
+                    base_samples_path_or_df = cand
+
+            if os.path.exists(base_samples_path_or_df):
+                try:
+                    df_base = pd.read_csv(base_samples_path_or_df, comment="#", encoding="utf-8")
+                except Exception:
+                    df_base = pd.read_csv(base_samples_path_or_df, comment="#")
+            else:
+                return df_mined
+
+        doy_cols = [c for c in df_base.columns if c.startswith("doy_")]
+        if not doy_cols or doy_list is None:
+            return pd.concat([df_base, df_mined], ignore_index=True)
+
+        sample_doys = [int(c.replace("doy_", "")) for c in doy_cols]
+        if sample_doys and max(sample_doys) <= 12:
+            sample_doys_interp = [float(d) * 30.5 - 15.0 for d in sample_doys]
+        else:
+            sample_doys_interp = [float(d) for d in sample_doys]
+
+        target_doys = [float(d) for d in doy_list]
+        raw_ts = df_base[doy_cols].values
+
+        aligned_ts = []
+        for row in raw_ts:
+            interp_row = np.interp(target_doys, sample_doys_interp, row)
+            aligned_ts.append(interp_row)
+        aligned_ts = np.array(aligned_ts, dtype=np.float32)
+
+        df_base_aligned = pd.DataFrame({
+            "point_id": df_base["point_id"] if "point_id" in df_base.columns else [f"BASE_{i:04d}" for i in range(len(df_base))],
+            "label": df_base["label"],
+            "crop_name": df_base["crop_name"] if "crop_name" in df_base.columns else "基准样本"
+        })
+        for idx, d in enumerate(doy_list):
+            df_base_aligned[f"doy_{d}"] = np.round(aligned_ts[:, idx], 4)
+
+        df_combined = pd.concat([df_base_aligned, df_mined], ignore_index=True)
+        self.logger.info(
+            f"  -> 样本库时相插值与自适应融合完成: 全国基准样本 {len(df_base)} 个 + 本地挖掘样本 {len(df_mined)} 个 -> 综合增强样本总数: {len(df_combined)} 个。"
+        )
+        return df_combined

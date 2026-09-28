@@ -224,6 +224,20 @@ class TimeSeriesBuilder:
         else:
             fourier_feats = np.zeros((ts.shape[0], 4), dtype=np.float32)
 
+        # 9. 方案 A：多尺度局部空间上下文反差与异质度 (Spatial Context & Local Contrast)
+        # 为树模型注入 2D 空间拓扑感知力：农田被道路水渠切割呈现局部反差，而连绵森林大山内部高度自相似
+        if is_3d:
+            from scipy import ndimage
+            peak_idx = int(np.argmax(np.mean(ts_for_pheno, axis=0)))
+            ndvi_peak_2d = ts_for_pheno[:, peak_idx].reshape(h, w)
+            mean_5x5_2d = ndimage.uniform_filter(ndvi_peak_2d, size=5)
+            spatial_contrast = (ndvi_peak_2d - mean_5x5_2d).reshape(-1, 1).astype(np.float32)
+            sq_5x5_2d = ndimage.uniform_filter(ndvi_peak_2d**2, size=5)
+            spatial_std = np.sqrt(np.maximum(sq_5x5_2d - mean_5x5_2d**2, 0.0)).reshape(-1, 1).astype(np.float32)
+            spatial_feats = np.hstack([spatial_contrast, spatial_std])
+        else:
+            spatial_feats = np.zeros((ts.shape[0], 2), dtype=np.float32)
+
         # 5. 组合全部特征向量：
         features = np.hstack([
             ts_for_pheno,
@@ -243,7 +257,8 @@ class TimeSeriesBuilder:
             lswi_feats,
             gcvi_feats,
             cv_feats,
-            fourier_feats
+            fourier_feats,
+            spatial_feats
         ])
 
         if is_3d:

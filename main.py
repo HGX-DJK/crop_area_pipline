@@ -64,6 +64,10 @@ def load_config(config_path="config.yaml"):
                 cfg["paths"][k] = _resolve(cfg["paths"][k])
     if "input_source" in cfg and "geotiff_dir" in cfg["input_source"]:
         cfg["input_source"]["geotiff_dir"] = _resolve(cfg["input_source"]["geotiff_dir"])
+    if "topography" in cfg and "dem_tif_path" in cfg["topography"]:
+        cfg["topography"]["dem_tif_path"] = _resolve(cfg["topography"]["dem_tif_path"])
+    if "prior_reference" in cfg and "prior_tif_path" in cfg["prior_reference"]:
+        cfg["prior_reference"]["prior_tif_path"] = _resolve(cfg["prior_reference"]["prior_tif_path"])
 
     is_valid, errors = validate_config(cfg)
     if not is_valid:
@@ -152,8 +156,28 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         # SDC6 双通道模式：每景产生 NDVI+LSWI 两通道；训练时 target_t = n_dates（文件数），
         # 与推断侧 extract_phenological_features 中 t_eff=n_dates 保持一致，避免特征维度错位
         n_dates = len(doy_list)
+        training_samples_path = config.get("paths", {}).get("training_samples", "data/sample_training_points.csv")
+        samples_to_train = training_samples_path
+
+        # 方案 A 增强：权威先验引导的主动自训练伪标签挖掘 (Prior-Guided Active Self-Training)
+        prior_cfg = config.get("prior_reference", {})
+        fusion_engine = None
+        prior_map = None
+        if prior_cfg.get("enable", False):
+            from src.prior_fusion import PriorReferenceFusion
+            fusion_engine = PriorReferenceFusion(config, logger)
+            multitemp_cube = loader.load_multitemporal_thumbnail(sorted_files, max_dim=1200)
+            prior_map = fusion_engine.load_or_generate_prior_map(geo_info, multitemp_cube, ts_builder)
+            if prior_cfg.get("auto_mine_pseudo_samples", False):
+                df_mined = fusion_engine.mine_prior_training_samples(
+                    multitemp_cube, prior_map, doy_list=doy_list, n_pos=600, n_neg=600
+                )
+                samples_to_train = fusion_engine.merge_training_samples(
+                    training_samples_path, df_mined, doy_list=doy_list
+                )
+
         classifier.train_with_samples(
-            config.get("paths", {}).get("training_samples", "data/sample_training_points.csv"),
+            samples_to_train,
             ts_builder=ts_builder,
             target_t=n_dates,
             doy_list=doy_list
@@ -185,8 +209,25 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
         logger.info("[步骤 2/5] 训练多时相作物智能分类器并执行像素级空间预测...")
         classifier = CropClassifier(config)
 
+        training_samples_path = config.get("paths", {}).get("training_samples", "data/sample_training_points.csv")
+        samples_to_train = training_samples_path
+        prior_cfg = config.get("prior_reference", {})
+        fusion_engine = None
+        prior_map = None
+        if prior_cfg.get("enable", False):
+            from src.prior_fusion import PriorReferenceFusion
+            fusion_engine = PriorReferenceFusion(config, logger)
+            prior_map = fusion_engine.load_or_generate_prior_map(geo_info, preview_cube, ts_builder)
+            if prior_cfg.get("auto_mine_pseudo_samples", False):
+                df_mined = fusion_engine.mine_prior_training_samples(
+                    preview_cube, prior_map, doy_list=ts_builder.doy_list, n_pos=200, n_neg=200
+                )
+                samples_to_train = fusion_engine.merge_training_samples(
+                    training_samples_path, df_mined, doy_list=ts_builder.doy_list
+                )
+
         classifier.train_with_samples(
-            config.get("paths", {}).get("training_samples", "data/sample_training_points.csv"),
+            samples_to_train,
             ts_builder=ts_builder,
             target_t=raster_cube.shape[2],
             doy_list=ts_builder.doy_list
@@ -205,13 +246,15 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
     prior_cfg = config.get("prior_reference", {})
     if prior_cfg.get("enable", False):
         logger.info("[步骤 2.5/5] 激活权威开源先验底图融合 (借力 CLCD/WorldCereal 成果)...")
-        from src.prior_fusion import PriorReferenceFusion
-        fusion_engine = PriorReferenceFusion(config, logger)
-        if input_mode == "geotiff" and sorted_files:
-            multitemp_cube = loader.load_multitemporal_thumbnail(sorted_files, max_dim=1200)
-            prior_map = fusion_engine.load_or_generate_prior_map(geo_info, multitemp_cube, ts_builder)
-        else:
-            prior_map = fusion_engine.load_or_generate_prior_map(geo_info, preview_cube, ts_builder)
+        if fusion_engine is None:
+            from src.prior_fusion import PriorReferenceFusion
+            fusion_engine = PriorReferenceFusion(config, logger)
+        if prior_map is None:
+            if input_mode == "geotiff" and sorted_files:
+                multitemp_cube = loader.load_multitemporal_thumbnail(sorted_files, max_dim=1200)
+                prior_map = fusion_engine.load_or_generate_prior_map(geo_info, multitemp_cube, ts_builder)
+            else:
+                prior_map = fusion_engine.load_or_generate_prior_map(geo_info, preview_cube, ts_builder)
         conf_map = fusion_engine.fuse_prediction_with_prior(conf_map, prior_map)
         crop_mask = (conf_map >= 0.50).astype(np.uint8)
         logger.info(f"  -> 先验融合完成，全域有效候选耕地像元数: {int(np.sum(crop_mask)):,}。")
