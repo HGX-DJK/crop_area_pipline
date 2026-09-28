@@ -104,14 +104,7 @@ class CropClassifier:
                 except Exception:
                     df = pd.read_csv(training_csv_path, comment="#")
             if "point_id" in df.columns:
-                n_before = len(df)
-                df = df[~df["point_id"].astype(str).str.startswith("CH_")].reset_index(drop=True)
-                if len(df) < n_before:
-                    try:
-                        df.to_csv(training_csv_path, index=False)
-                        self.logger.info(f"已自动清洗掉 {n_before - len(df)} 个模拟负样本，恢复真实高质基准样本库 ({len(df)} 个样点)。")
-                    except Exception:
-                        pass
+                self.logger.info(f"成功载入外部标定样点集: {training_csv_path} (共 {len(df)} 个样点)")
 
         doy_cols = [c for c in df.columns if c.startswith("doy_")]
         sample_doys = [int(c.replace("doy_", "")) for c in doy_cols]
@@ -188,8 +181,8 @@ class CropClassifier:
                 for i in range(len(y_array)):
                     c_name = crop_names[i]
                     if y_array[i] > 0:
-                        # 农田：平整地块、内部均质度高 (0.015 ~ 0.038)
-                        ts_cv[i, :] = np.random.uniform(0.015, 0.038, ts_values.shape[1])
+                        # 农田：平原大田与西南山地/丘陵破碎梯田 (0.015 ~ 0.160，包容梯田田埂微地形)
+                        ts_cv[i, :] = np.random.uniform(0.015, 0.160, ts_values.shape[1])
                     else:
                         is_canyon_scrub = ("灌" in c_name or "荒坡" in c_name or "河谷" in c_name or
                                            (np.min(ts_values[i]) < 0.28 and np.max(ts_values[i]) > 0.65))
@@ -563,19 +556,18 @@ class CropClassifier:
             p_range = p_max - p_min
 
             # 核心物理约束 1：旺季生长峰值与年内收割/翻耕低谷
-            # 真实农田必须达到起码的冠层绿度 (p_max >= 0.42)，且必须有翻耕收获休耕低谷 (p_min <= 0.38) 与年内起伏 (p_range >= 0.20)
-            # 全年最低 NDVI 仍 >= 0.42，或全年均值 >= 0.58 的像元，在自然界 100% 属于常绿林冠与多年生乔木林！
-            basic_valid = (p_max >= 0.42) & (p_min <= 0.38) & (p_range >= 0.20)
+            # 真实农田达到冠层绿度 (p_max >= 0.38)，具备翻耕收获休耕低谷 (p_min <= 0.40) 与年内起伏 (p_range >= 0.18)
+            basic_valid = (p_max >= 0.38) & (p_min <= 0.40) & (p_range >= 0.18)
             is_dense_forest = (p_min >= 0.42) | (p_mean >= 0.58)
 
             # 核心物理约束 2：微观林冠粗糙度与树阴异质度 (CV_B4 拦截)
-            # 农田地表平整均质 (CV < 0.10)，天然林地树冠起伏、阴影杂乱 (CV 通常 > 0.15)
+            # 农田地表平整均质 (CV < 0.10)，天然林地树冠起伏、阴影杂乱 (CV 通常 > 0.18)
             # cv_feats 位于特征矩阵的 t_eff + 17 列 (cv_mean)
             cv_col = t_eff + 17
             if f > cv_col:
                 cv_mean_val = X_flat[:, cv_col]
-                # 局域近红外变异系数超过 0.15 的像元判定为粗糙林冠/山坡杂灌
-                is_rough_canopy = (cv_mean_val > 0.15)
+                # 局域近红外变异系数超过 0.18 的像元判定为粗糙深山林冠/山坡杂灌
+                is_rough_canopy = (cv_mean_val > 0.18)
             else:
                 is_rough_canopy = np.zeros(len(X_flat), dtype=bool)
 

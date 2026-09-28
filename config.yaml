@@ -62,15 +62,15 @@ prior_reference:
   enable: true                 # 是否启用权威开源先验底图融合 (借力武大 CLCD / 欧空局 WorldCereal)
   provider: "clcd"             # 权威参考源: 'clcd' (武大黄昕), 'worldcereal' (欧空局), 'auto' (内置权威农学规则)
   prior_tif_path: ""           # 本地权威底图文件路径 (留空则自动启用内置权威农学先验引擎)
-  fusion_weight: 0.6           # 贝叶斯融合权重 (0.0~1.0)
-  enable_hard_veto: true       # 是否启用先验一票否决 (彻底杜绝森林与高山荒草坡误判)
-  auto_mine_pseudo_samples: true  # 是否基于先验自动提取高纯样本增强训练 (方案 A: Prior-Guided Active Self-Training)
+  fusion_weight: 0.5           # 贝叶斯融合权重 (0.0~1.0)
+  enable_hard_veto: false      # 关闭一刀切硬否决，采用连续概率软融合，保护山地梯田边缘
+  auto_mine_pseudo_samples: false # 严格使用真实实测标定样点集，关闭启发式伪标签干扰
 
 topography:
   enable_dem_mask: true            # 是否启用 DEM 地形物理阻断 (100% 消除高山深山误判)
   dem_tif_path: "data/dem_and_slope.tif" # 本地 30m 高程与坡度 TIF
-  max_elevation_m: 1800.0          # 农业耕作最高海拔限值（米，西南川西低山河谷耕作带标准为 1800m）
-  max_slope_deg: 18.0              # 西南高山峡谷水土保持与坡耕地梯田化安全限值（18°，彻底消除陡崖与深山误判）
+  max_elevation_m: 2100.0          # 农业耕作最高海拔限值（米，对齐川西高原阶地农田标准 2100m）
+  max_slope_deg: 25.0              # 西南山地坡耕地与梯田化国家法定安全限值（25°，对齐三调标准）
 
 rotation_tracking:
   enabled: false               # 是否在主流程默认执行多年期轮作与撂荒分析（亦可通过命令行 --track-rotation 随时开启）

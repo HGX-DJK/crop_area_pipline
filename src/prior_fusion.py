@@ -243,46 +243,36 @@ class PriorReferenceFusion:
         # 初始化中性先验 0.5 (与当前传入矩阵尺寸对齐)
         prior = np.full((cur_h, cur_w), 0.5, dtype=np.float32)
 
-        # 1. 纯水体/深阴影/裸岩/山地瘠薄杂灌抑制
-        # 农田在旺季生长峰值必然具备显著绿度 (max_ndvi >= 0.42) 与轮作收割振幅 (range_ndvi >= 0.20)
-        # 全年峰值不足 0.42 或全年起伏不足 0.20 的山区植被，物理上绝非健康农田，直接压制为非耕地
-        prior[mean_ndvi < 0.20] = 0.01
-        prior[max_ndvi < 0.42] = 0.01
-        prior[(range_ndvi < 0.20) & (max_ndvi < 0.60)] = 0.02
-
-        # 2. 天然常绿/半常绿山地森林与多年生林木绝杀 (Forest Veto)
-        # 农学与遥感物理不可违背法则：一年生农作物必有收割/翻耕/休耕阶段，全年最低 NDVI 必然 <= 0.38。
-        # 全年 4 个时相中，最低 NDVI 仍 >= 0.42，或全年均值 >= 0.58 的像元，
-        # 在物理上 100% 属于常绿针叶林、常绿/落叶针阔混交林或深山原生林冠，绝非农田！
-        is_dense_forest = (min_ndvi >= 0.42) | (mean_ndvi >= 0.58)
-        prior[is_dense_forest] = 0.01
-
-        # 3. 纯水体与水库消落带绝对硬压制
+        # 1. 纯水体与极低反射率绝对硬压制 (Water / Deep Shadow)
         prior[min_ndvi < 0.0] = 0.00
-        prior[max_ndvi < 0.25] = 0.00
+        prior[max_ndvi < 0.22] = 0.00
 
-        # 4. 亚高山野生草坡与干热河谷季节性落叶灌丛/荒坡抑制 (Canyon Scrub & Meadow Veto)
-        # 川西干热河谷特有生态：冬春极旱 (NDVI <= 0.28, LSWI < 0)，夏季雨季暴绿 (NDVI >= 0.65)，
-        # 此类野生旱生落叶刺灌丛/荒草坡绝非农田，必须坚决压制为非耕地
+        # 2. 城镇建筑/道路/裸岩/永久不毛之地 (Barren / Built-up)
+        # 全年峰值不足 0.35 或全年季相无明显植被起伏 (range < 0.15)
+        prior[max_ndvi < 0.35] = 0.01
+        prior[(range_ndvi < 0.15) & (max_ndvi < 0.50)] = 0.02
+
+        # 3. 天然常绿/半常绿山地森林与多年生林冠绝杀 (Evergreen Forest Veto)
+        # 农学不可违背法则：一年生或季节性农作物必有收割/翻耕阶段，全年最低 NDVI 必然 <= 0.40。
+        # 全年最低 NDVI >= 0.42 且全年均值 >= 0.55 的深山植被，100% 属于常绿原生林冠或针阔混交林
+        is_dense_forest = (min_ndvi >= 0.42) & (mean_ndvi >= 0.55)
+        prior[is_dense_forest] = 0.05
+
+        # 4. 亚高山湿生草甸 (高水分且夏季高绿度持续)
         if ts_lswi is not None and ts_ndvi.shape[2] >= 4:
             nd1, nd2, nd3, nd4 = ts_ndvi[:, :, 0], ts_ndvi[:, :, 1], ts_ndvi[:, :, 2], ts_ndvi[:, :, 3]
             lw1, lw2, lw3, lw4 = ts_lswi[:, :, 0], ts_lswi[:, :, 1], ts_lswi[:, :, 2], ts_lswi[:, :, 3]
 
-            # 高山湿生草甸 (夏季与秋季水分充沛)
-            is_alpine_meadow = (lw2 > 0.12) & (lw4 > 0.14) & (nd2 > 0.68) & (nd4 > 0.66)
-            prior[is_alpine_meadow] = 0.02
+            is_alpine_meadow = (lw2 > 0.15) & (lw4 > 0.15) & (nd2 > 0.70) & (nd4 > 0.70)
+            prior[is_alpine_meadow] = 0.05
 
-            # 干热河谷季节性旱生落叶灌丛/荒坡 (冬春水分亏缺，夏季雨季骤绿)
-            is_dry_canyon_scrub = (min_ndvi <= 0.28) & ((lw1 < 0.0) | (lw2 < 0.0)) & (nd3 >= 0.60)
-            prior[is_dry_canyon_scrub] = 0.01
-
-            # 真正西南丘陵山地两熟/单季农田先验 (需具备农田水分或适度冬绿冠层)
+            # 真正西南丘陵山地耕地先验 (两熟/单季农田：冬春翻耕/低绿，夏秋生长峰值显著，生长季具有适度水分)
             is_real_crop = (
-                (~is_dense_forest) & (~is_dry_canyon_scrub) & (~is_alpine_meadow) &
-                (nd3 >= 0.55) & (range_ndvi >= 0.25) & (min_ndvi <= 0.38) &
-                (lw3 >= 0.05)  # 生长旺季农田具备起码的水分保障
+                (~is_dense_forest) & (~is_alpine_meadow) &
+                (nd3 >= 0.50) & (range_ndvi >= 0.20) & (min_ndvi <= 0.40) &
+                (lw3 >= -0.05)  # 生长旺季农田具备起码的水分保障
             )
-            prior[is_real_crop] = 0.75
+            prior[is_real_crop] = 0.80
         elif ts_ndvi.shape[2] >= 4:
             doy1_nd = ts_ndvi[:, :, 0]
             doy2_nd = ts_ndvi[:, :, 1]
@@ -290,16 +280,13 @@ class PriorReferenceFusion:
             doy4_nd = ts_ndvi[:, :, 3]
 
             is_alpine_meadow = (doy3_nd > 0.82) & (doy4_nd > 0.68) & (doy1_nd < 0.50) & (range_ndvi < 0.38)
-            prior[is_alpine_meadow] = 0.02
-
-            is_dry_canyon_scrub = (min_ndvi <= 0.26) & (range_ndvi >= 0.40) & (mean_ndvi <= 0.50)
-            prior[is_dry_canyon_scrub] = 0.01
+            prior[is_alpine_meadow] = 0.05
 
             is_real_crop = (
-                (~is_dense_forest) & (~is_dry_canyon_scrub) & (~is_alpine_meadow) &
-                (doy3_nd >= 0.55) & (range_ndvi >= 0.25) & (min_ndvi <= 0.38)
+                (~is_dense_forest) & (~is_alpine_meadow) &
+                (doy3_nd >= 0.50) & (range_ndvi >= 0.20) & (min_ndvi <= 0.40)
             )
-            prior[is_real_crop] = 0.75
+            prior[is_real_crop] = 0.80
 
         # 缩略图模式空间分辨率自适应放大 (从 1200 放大至目标全幅 3660)
         if (cur_h, cur_w) != (h, w):
@@ -325,8 +312,17 @@ class PriorReferenceFusion:
             )
 
         w = self.fusion_weight
-        # 若本地模型本身已经判别为低概率背景 (P_local < 0.30)，先验不应逆向将其拉高为耕地
-        p_base = np.where(prob_local < 0.30, prob_local * 0.5, w * prob_prior + (1.0 - w) * prob_local)
+        has_ext_tif = bool(self.prior_tif_path and os.path.exists(self.prior_tif_path))
+        if has_ext_tif:
+            # 外部权威底图 (CLCD/WorldCereal) 执行严格贝叶斯融合
+            p_base = np.where(prob_local < 0.30, prob_local * 0.5, w * prob_prior + (1.0 - w) * prob_local)
+        else:
+            # 内置先验启发模式：主要起正向置信度赋能与物理边界约束作用，绝不可逆向拖垮本地高置信度耕地 (P_local >= 0.35)
+            p_base = np.where(
+                prob_local >= 0.35,
+                np.maximum(prob_local, w * prob_prior + (1.0 - w) * prob_local),
+                np.where(prob_prior >= 0.70, w * prob_prior + (1.0 - w) * prob_local, prob_local * 0.5)
+            )
 
         if self.enable_hard_veto:
             # 权威底图一票否决：
@@ -385,9 +381,12 @@ class PriorReferenceFusion:
         n_dates = ts_ndvi.shape[2]
         doys = doy_list if (doy_list and len(doy_list) == n_dates) else [i + 1 for i in range(n_dates)]
 
-        # 1. 挖掘高纯度农田正样本 (Prior >= 0.70 且坚决排除极旱荒灌与陡坡)
-        is_dry_canyon_scrub = (np.min(ts_ndvi, axis=2) <= 0.28) & (np.max(ts_ndvi, axis=2) >= 0.60)
-        pos_mask = (prior_map >= 0.70) & (np.min(ts_ndvi, axis=2) <= 0.38) & (~is_dry_canyon_scrub)
+        # 1. 挖掘高纯度农田正样本 (Prior >= 0.70 且处于低海拔适宜耕作区，具备显著季节振幅)
+        min_nd = np.min(ts_ndvi, axis=2)
+        max_nd = np.max(ts_ndvi, axis=2)
+        ptp_nd = max_nd - min_nd
+
+        pos_mask = (prior_map >= 0.70) & (min_nd <= 0.40) & (max_nd >= 0.50) & (ptp_nd >= 0.20)
         if self.enable_dem_mask:
             dem_mask = self.load_dem_veto_mask(None, h, w)
             if dem_mask is not None:
@@ -397,19 +396,17 @@ class PriorReferenceFusion:
                 pos_mask = pos_mask & (~dem_mask)
         pos_indices = np.argwhere(pos_mask)
 
-        # 2. 挖掘高纯度复杂背景负样本 (Prior <= 0.05)
-        # 重点覆盖四大易混淆非耕地：
-        # (1) 干热河谷季节性落叶灌丛/荒坡 (冬春低绿、夏季暴绿、缺水)
-        neg_canyon_scrub = (prior_map <= 0.05) & is_dry_canyon_scrub
-        # (2) 高山野生草坡 (夏季高 NDVI)
-        neg_meadow_mask = (prior_map <= 0.05) & (np.max(ts_ndvi, axis=2) >= 0.70) & (~is_dry_canyon_scrub)
-        # (3) 常绿森林
-        neg_forest_mask = (prior_map <= 0.05) & (np.min(ts_ndvi, axis=2) >= 0.45)
-        # (4) 库区水体与消落带
-        neg_water_mask = (prior_map <= 0.02) & (np.min(ts_ndvi, axis=2) <= 0.05)
-        neg_other_mask = (prior_map <= 0.02)
+        # 2. 挖掘高纯度复杂背景负样本 (真实深山森林、水体、城镇建设用地、高海拔非耕地)
+        # (1) 常绿天然森林 (终年高绿度，最低 NDVI >= 0.42 且均值 >= 0.55)
+        neg_forest_mask = (min_nd >= 0.42) & (np.mean(ts_ndvi, axis=2) >= 0.55)
+        # (2) 库区水体/江河消落带
+        neg_water_mask = (max_nd <= 0.22) | (min_nd <= 0.0)
+        # (3) 城镇建设用地/道路/裸岩 (终年低绿度平坦)
+        neg_built_mask = (max_nd <= 0.32) & (ptp_nd <= 0.15)
+        # (4) 高山深山背景 (受 DEM 地形掩膜阻断的深山陡坡)
+        neg_dem_steep = dem_mask if (self.enable_dem_mask and dem_mask is not None) else np.zeros_like(pos_mask)
 
-        neg_indices = np.argwhere(neg_canyon_scrub | neg_meadow_mask | neg_forest_mask | neg_water_mask | neg_other_mask)
+        neg_indices = np.argwhere((neg_forest_mask | neg_water_mask | neg_built_mask | (neg_dem_steep & (prior_map <= 0.10))))
 
         records = []
         p_count = 0
@@ -435,14 +432,14 @@ class PriorReferenceFusion:
             chosen = neg_indices[np.random.choice(len(neg_indices), sample_size, replace=False)]
             for r, c in chosen:
                 p_count += 1
-                if neg_canyon_scrub[r, c]:
-                    cname = "干热河谷落叶灌丛/荒坡"
-                elif neg_water_mask[r, c]:
+                if neg_water_mask[r, c]:
                     cname = "库区水体/消落带"
-                elif np.max(ts_ndvi[r, c]) >= 0.75:
-                    cname = "高山野生草坡"
+                elif neg_built_mask[r, c]:
+                    cname = "城镇/道路/裸地"
+                elif neg_dem_steep[r, c]:
+                    cname = "高山陡坡/深山背景"
                 else:
-                    cname = "常绿森林/背景"
+                    cname = "常绿森林/林木"
                 row = {
                     "point_id": f"PRIOR_NEG_{p_count:04d}",
                     "label": 0,
