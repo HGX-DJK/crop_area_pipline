@@ -256,7 +256,7 @@ def run_pipeline(config_path="config.yaml", override_mode=None, override_geotiff
             else:
                 prior_map = fusion_engine.load_or_generate_prior_map(geo_info, preview_cube, ts_builder)
         conf_map = fusion_engine.fuse_prediction_with_prior(conf_map, prior_map)
-        crop_mask = (conf_map >= 0.50).astype(np.uint8)
+        crop_mask = (conf_map >= 0.40).astype(np.uint8)
         logger.info(f"  -> 先验融合完成，全域有效候选耕地像元数: {int(np.sum(crop_mask)):,}。")
 
     # 4. 零碎地块形态学分割与田埂切分（核心：联合国手册第8章）

@@ -69,8 +69,8 @@ prior_reference:
 topography:
   enable_dem_mask: true            # 是否启用 DEM 地形物理阻断 (100% 消除高山深山误判)
   dem_tif_path: "data/dem_and_slope.tif" # 本地 30m 高程与坡度 TIF
-  max_elevation_m: 2100.0          # 农业耕作最高海拔限值（米，对齐川西高原阶地农田标准 2100m）
-  max_slope_deg: 25.0              # 西南山地坡耕地与梯田化国家法定安全限值（25°，对齐三调标准）
+  max_elevation_m: 2500.0          # 农业耕作最高海拔限值（米，放宽至川西高原河谷坝子青稞/油菜极限海拔 2500m）
+  max_slope_deg: 30.0              # 西南山地坡耕地与梯田化坡度上限（放宽至 30°，包容更多山地梯田）
 
 rotation_tracking:
   enabled: false               # 是否在主流程默认执行多年期轮作与撂荒分析（亦可通过命令行 --track-rotation 随时开启）
