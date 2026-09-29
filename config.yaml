@@ -37,7 +37,7 @@ segmentation:
   min_parcel_area_m2: 3600.0    # 最小合法地块面积阈值（约 5.4 亩，4个30m像元，有效保留南方丘陵真实家庭农田并滤除孤立单像元噪点）
   max_parcel_area_m2: 800000.0  # 触发智能细分的单块面积阈值（80 公顷 ≈ 1200 亩，保持规整农场完整性）
   discard_oversized: false      # 是否丢弃超过上限的斑块（保留超大集中连片农田）
-  max_export_parcels: 5000      # 矢量化导出的主力核心地块上限（扩大至 5000 块，让河谷平原农田大面积饱满呈现）
+  max_export_parcels: 8000      # 矢量化导出的主力核心地块上限（扩大至 8000 块，让河谷平原与山地梯田农田更完整呈现）
   connectivity: 8               # 连通域拓扑连接方式（4连通或8连通）
   enable_obia: false            # 是否启用 OBIA (SLIC 超像素) 辅助分割 (大规模遥感影像推荐关闭以提升性能，保持毫秒级形态学切分)
 
@@ -69,7 +69,7 @@ prior_reference:
 topography:
   enable_dem_mask: true            # 是否启用 DEM 地形物理阻断 (100% 消除高山深山误判)
   dem_tif_path: "data/dem_and_slope.tif" # 本地 30m 高程与坡度 TIF
-  max_elevation_m: 2500.0          # 农业耕作最高海拔限值（米，放宽至川西高原河谷坝子青稞/油菜极限海拔 2500m）
+  max_elevation_m: 2600.0          # 农业耕作最高海拔限值（米，放宽至川西高原河谷坝子青稞/油菜极限海拔 2600m）
   max_slope_deg: 30.0              # 西南山地坡耕地与梯田化坡度上限（放宽至 30°，包容更多山地梯田）
 
 rotation_tracking:

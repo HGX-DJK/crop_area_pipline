@@ -181,8 +181,8 @@ class CropClassifier:
                 for i in range(len(y_array)):
                     c_name = crop_names[i]
                     if y_array[i] > 0:
-                        # 农田：平原大田与西南山地/丘陵破碎梯田 (0.015 ~ 0.160，包容梯田田埂微地形)
-                        ts_cv[i, :] = np.random.uniform(0.015, 0.160, ts_values.shape[1])
+                        # 农田：平原大田与西南山地/丘陵破碎梯田 (0.015 ~ 0.350，全面包容高山河谷与破碎梯田田埂微地形)
+                        ts_cv[i, :] = np.random.uniform(0.015, 0.350, ts_values.shape[1])
                     else:
                         is_canyon_scrub = ("灌" in c_name or "荒坡" in c_name or "河谷" in c_name or
                                            (np.min(ts_values[i]) < 0.28 and np.max(ts_values[i]) > 0.65))
@@ -556,18 +556,18 @@ class CropClassifier:
             p_range = p_max - p_min
 
             # 核心物理约束 1：旺季生长峰值与年内收割/翻耕低谷
-            # 真实农田达到冠层绿度 (p_max >= 0.38)，具备翻耕收获休耕低谷 (p_min <= 0.40) 与年内起伏 (p_range >= 0.18)
-            basic_valid = (p_max >= 0.38) & (p_min <= 0.40) & (p_range >= 0.18)
-            is_dense_forest = (p_min >= 0.42) | (p_mean >= 0.58)
+            # 真实农田达到冠层绿度 (p_max >= 0.35)，具备翻耕收获休耕低谷 (p_min <= 0.45) 与年内起伏 (p_range >= 0.18)
+            basic_valid = (p_max >= 0.35) & (p_min <= 0.45) & (p_range >= 0.18)
+            # 常绿森林必须同时满足最低绿度高与全年均值高 (使用 & 逻辑，避免高产田块被误杀)
+            is_dense_forest = (p_min >= 0.42) & (p_mean >= 0.55)
 
-            # 核心物理约束 2：微观林冠粗糙度与树阴异质度 (CV_B4 拦截)
-            # 农田地表平整均质 (CV < 0.10)，天然林地树冠起伏、阴影杂乱 (CV 通常 > 0.18)
-            # cv_feats 位于特征矩阵的 t_eff + 17 列 (cv_mean)
-            cv_col = t_eff + 17
+            # 核心物理约束 2：微观林冠粗糙度与树阴异质度 (修正列索引: cv_mean 位于 t_eff + 20 列)
+            # 杜绝将 t_eff + 17 列 (lswi_ndvi_diff) 误当做粗糙度而误杀高水分优质水田
+            cv_col = t_eff + 20
             if f > cv_col:
                 cv_mean_val = X_flat[:, cv_col]
-                # 局域近红外变异系数超过 0.18 的像元判定为粗糙深山林冠/山坡杂灌
-                is_rough_canopy = (cv_mean_val > 0.18)
+                # 仅对极其粗糙的深山断崖/原始林冠阴影 (CV > 0.25) 进行物理拦截，包容山地梯田坎微地形
+                is_rough_canopy = (cv_mean_val > 0.25)
             else:
                 is_rough_canopy = np.zeros(len(X_flat), dtype=bool)
 
@@ -578,9 +578,8 @@ class CropClassifier:
                 # 排除高山常绿阔叶/针叶林与平坦草坪
                 is_forest = is_dense_forest | ((ts_early >= 0.38) & (ts_mid >= 0.65) & (ts_late >= 0.55) & (p_range < 0.28))
                 is_lawn = (p_range < 0.18) & (p_max < 0.65)
-                # ★ 排除干热河谷季风落叶荒灌/消落带 (冬春极度枯黄低谷 <=0.24，仅夏季雨季暴绿但缺乏全年生长管护)
-                is_canyon_scrub = (p_min <= 0.24) & (p_max >= 0.65) & (ts_early <= 0.26) & (ts_mid >= 0.70)
-                invalid_crop = crop_cand & ((~basic_valid) | is_rough_canopy | is_forest | is_lawn | is_canyon_scrub)
+                # 移除已被证伪的 is_canyon_scrub (冬春裸土+夏季峰值属正宗夏熟作物物候，由 XGBoost 依据 120 块灌丛草甸样点自然判别)
+                invalid_crop = crop_cand & ((~basic_valid) | is_rough_canopy | is_forest | is_lawn)
             else:
                 invalid_crop = crop_cand & ((~basic_valid) | is_rough_canopy | is_dense_forest)
 
